@@ -143,3 +143,56 @@ fn the_roc_core_makes_the_engines_drop_choices_as_the_rust_core_does() {
     assert!(accepted > 0);
     eprintln!("engine drop: {runs} questions answered alike ({accepted} drops accepted)");
 }
+
+/// Relocation (`rift_core::placement::relocation`) on the facts' token form: every policy, a few
+/// workspaces and Spaces (so owners are the source, the destination or a third), every pair of
+/// families, layouts and trees present or not.
+#[test]
+fn the_roc_core_relocates_as_the_rust_core_does() {
+    use rift_core::placement::{Edited, Family, Policy, RelocationFacts, relocation};
+    let mut rng = Rng(0x2E10_CA7E_0E1C);
+    let runs: u64 =
+        std::env::var("RIFT_ENGINE_RELOCATION_CASES").map_or(20_000, |n| n.parse().unwrap());
+    let family =
+        |r: &mut Rng| [Family::Floating, Family::Scrolling, Family::Tiled][r.below(3) as usize];
+    let mut moved = 0;
+    for case in 0..runs {
+        let policy = match rng.below(5) {
+            0 => Policy::Workspace,
+            1 => Policy::Observed,
+            2 => Policy::Drop(Edited::Tree(())),
+            3 => Policy::Drop(Edited::NoTree),
+            _ => Policy::Directional(rng.direction()),
+        };
+        let families = if rng.below(8) == 0 {
+            None
+        } else {
+            Some((family(&mut rng), family(&mut rng)))
+        };
+        let facts: RelocationFacts<u64, u64, Direction, (), ()> = RelocationFacts {
+            policy,
+            source: 10,
+            destination: 11,
+            families,
+            space: 1,
+            destination_space: match rng.below(6) {
+                0 => None,
+                1 => Some(2),
+                _ => Some(1),
+            },
+            owner: rng.maybe(|r| 10 + r.below(3)),
+            projected_floating: rng.below(2) == 0,
+            in_floats: rng.below(2) == 0,
+            layout: if rng.below(4) == 0 { None } else { Some(()) },
+            preserve_widths: rng.below(2) == 0,
+            unavailable: rng.below(5) == 0,
+            placeable: rng.below(5) > 0,
+        };
+        let rust = relocation(facts);
+        let roc = rift_core_roc::placement::engine_relocation(facts);
+        assert_eq!(roc, rust, "case {case}: {facts:?}");
+        moved += u64::from(matches!(rust, rift_core::placement::Relocation::Move { .. }));
+    }
+    assert!(moved > 0);
+    eprintln!("engine relocation: {runs} questions answered alike ({moved} moves)");
+}

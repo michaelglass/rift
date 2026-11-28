@@ -43,6 +43,7 @@ FAST_CUTS=(
     RIFT_ENGINE_FOCUS_CASES=2000 # rift-core-roc: the engine's focus choices (20,000)
     RIFT_ENGINE_SWITCHING_CASES=2000 # rift-core-roc: the engine's switching choices (20,000)
     RIFT_ENGINE_DROP_CASES=2000 # rift-core-roc: the engine's drop choices (20,000)
+    RIFT_ENGINE_RELOCATION_CASES=2000 # rift-core-roc: the engine's relocation (20,000)
     RIFT_SESSION_ROUNDS=40     # rift-core-roc: the session (200)
 )
 # The full run's fuzzer budget.

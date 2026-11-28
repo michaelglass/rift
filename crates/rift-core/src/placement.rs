@@ -878,6 +878,219 @@ pub fn relocation<K: Copy + PartialEq, S: PartialEq, D, T, L>(
     Relocation::Move { assign, projection, afterwards }
 }
 
+impl<K: Copy, S: Copy, D: Copy, T, L> RelocationFacts<K, S, D, T, L> {
+    /// The facts with the payloads the engine holds (the drop's tree, the destination's layout)
+    /// as tokens: what a twin decides on.
+    pub fn tokens(&self) -> RelocationFacts<K, S, D, (), ()> {
+        RelocationFacts {
+            policy: match self.policy {
+                Policy::Workspace => Policy::Workspace,
+                Policy::Observed => Policy::Observed,
+                Policy::Drop(Edited::Tree(_)) => Policy::Drop(Edited::Tree(())),
+                Policy::Drop(Edited::NoTree) => Policy::Drop(Edited::NoTree),
+                Policy::Directional(d) => Policy::Directional(d),
+            },
+            source: self.source,
+            destination: self.destination,
+            families: self.families,
+            space: self.space,
+            destination_space: self.destination_space,
+            owner: self.owner,
+            projected_floating: self.projected_floating,
+            in_floats: self.in_floats,
+            layout: self.layout.as_ref().map(|_| ()),
+            preserve_widths: self.preserve_widths,
+            unavailable: self.unavailable,
+            placeable: self.placeable,
+        }
+    }
+}
+
+impl<K: Copy, S: Copy, D: Copy> RelocationFacts<K, S, D, (), ()> {
+    /// The token facts with their workspaces, Spaces and directions renamed.
+    pub fn map<K2, S2, D2>(
+        self,
+        k: impl Fn(K) -> K2,
+        s: impl Fn(S) -> S2,
+        d: impl Fn(D) -> D2,
+    ) -> RelocationFacts<K2, S2, D2, (), ()> {
+        RelocationFacts {
+            policy: match self.policy {
+                Policy::Workspace => Policy::Workspace,
+                Policy::Observed => Policy::Observed,
+                Policy::Drop(edited) => Policy::Drop(edited),
+                Policy::Directional(x) => Policy::Directional(d(x)),
+            },
+            source: k(self.source),
+            destination: k(self.destination),
+            families: self.families,
+            space: s(self.space),
+            destination_space: self.destination_space.map(&s),
+            owner: self.owner.map(&k),
+            projected_floating: self.projected_floating,
+            in_floats: self.in_floats,
+            layout: self.layout,
+            preserve_widths: self.preserve_widths,
+            unavailable: self.unavailable,
+            placeable: self.placeable,
+        }
+    }
+}
+
+impl<D> Relocation<D, (), ()> {
+    /// The token plan with its direction renamed.
+    pub fn map<D2>(self, d: impl FnOnce(D) -> D2) -> Relocation<D2, (), ()> {
+        match self {
+            Relocation::Refused(r) => Relocation::Refused(r),
+            Relocation::Move { assign, projection, afterwards } => Relocation::Move {
+                assign,
+                projection: match projection {
+                    Projection::Float { observed } => Projection::Float { observed },
+                    Projection::Unfloat { placed } => Projection::Unfloat { placed },
+                    Projection::Tile { placed } => Projection::Tile { placed },
+                    Projection::Toward { direction, width, layout } => Projection::Toward {
+                        direction: d(direction),
+                        width,
+                        layout,
+                    },
+                },
+                afterwards,
+            },
+        }
+    }
+}
+
+/// Whether the facts hold every payload a token plan names (a tree for `Edited`, a layout for
+/// `Add` and `Toward`): a twin's plan naming one they lack is a difference.
+pub fn holds<K, S, D, T, L, D2>(
+    facts: &RelocationFacts<K, S, D, T, L>,
+    plan: &Relocation<D2, (), ()>,
+) -> bool {
+    let tree = matches!(facts.policy, Policy::Drop(Edited::Tree(_)));
+    let layout = facts.layout.is_some();
+    let placed = |edited: bool, add: bool| (!edited || tree) && (!add || layout);
+    match plan {
+        Relocation::Refused(_) => true,
+        Relocation::Move { projection, .. } => match projection {
+            Projection::Float { .. } => true,
+            Projection::Unfloat { placed: p } => placed(
+                matches!(p, Placed::Edited { .. }),
+                matches!(p, Placed::Add { .. }),
+            ),
+            Projection::Tile { placed: p } => placed(
+                matches!(p, Placed::Edited { .. }),
+                matches!(p, Placed::Add { .. }),
+            ),
+            Projection::Toward { .. } => layout,
+        },
+    }
+}
+
+/// Relocation facts in their token form: what a twin decides on.
+pub type Shape<K, S, D> = RelocationFacts<K, S, D, (), ()>;
+
+/// The payloads relocation facts carry for the engine: the drop's tree and the destination's
+/// layout.
+#[derive(Debug)]
+pub struct Payloads<T, L> {
+    pub tree: Edited<T>,
+    pub layout: Option<L>,
+}
+
+impl<K: Copy, S: Copy, D: Copy, T, L> RelocationFacts<K, S, D, T, L> {
+    /// The facts as their token form and their payloads.
+    pub fn split(self) -> (Shape<K, S, D>, Payloads<T, L>) {
+        let shape = self.tokens();
+        let tree = match self.policy {
+            Policy::Drop(edited) => edited,
+            Policy::Workspace | Policy::Observed | Policy::Directional(_) => Edited::NoTree,
+        };
+        (shape, Payloads { tree, layout: self.layout })
+    }
+}
+
+impl<K, S, D> RelocationFacts<K, S, D, (), ()> {
+    /// The token facts with the payloads put back.
+    pub fn with<T, L>(self, payloads: Payloads<T, L>) -> RelocationFacts<K, S, D, T, L> {
+        RelocationFacts {
+            policy: match (self.policy, payloads.tree) {
+                (Policy::Drop(_), tree) => Policy::Drop(tree),
+                (Policy::Workspace, _) => Policy::Workspace,
+                (Policy::Observed, _) => Policy::Observed,
+                (Policy::Directional(d), _) => Policy::Directional(d),
+            },
+            source: self.source,
+            destination: self.destination,
+            families: self.families,
+            space: self.space,
+            destination_space: self.destination_space,
+            owner: self.owner,
+            projected_floating: self.projected_floating,
+            in_floats: self.in_floats,
+            layout: payloads.layout,
+            preserve_widths: self.preserve_widths,
+            unavailable: self.unavailable,
+            placeable: self.placeable,
+        }
+    }
+}
+
+/// A token placement with the payloads put in; the payloads back if it names one they lack.
+fn attach_placed<Wd, T, L>(
+    placed: Placed<Wd, (), ()>,
+    payloads: Payloads<T, L>,
+) -> Result<Placed<Wd, T, L>, Payloads<T, L>> {
+    match (placed, payloads) {
+        (Placed::Edited { width, .. }, Payloads { tree: Edited::Tree(tree), .. }) => {
+            Ok(Placed::Edited { tree, width })
+        }
+        (Placed::Add { width, .. }, Payloads { layout: Some(layout), .. }) => {
+            Ok(Placed::Add { layout, width })
+        }
+        (Placed::NoLayout, _) => Ok(Placed::NoLayout),
+        (Placed::Edited { .. } | Placed::Add { .. }, payloads) => Err(payloads),
+    }
+}
+
+/// A token plan with the payloads put in; the payloads back if it names one they lack.
+fn attach<D, T, L>(
+    plan: Relocation<D, (), ()>,
+    payloads: Payloads<T, L>,
+) -> Result<Relocation<D, T, L>, Payloads<T, L>> {
+    let (assign, projection, afterwards) = match plan {
+        Relocation::Refused(r) => return Ok(Relocation::Refused(r)),
+        Relocation::Move { assign, projection, afterwards } => (assign, projection, afterwards),
+    };
+    let projection = match (projection, payloads) {
+        (Projection::Float { observed }, _) => Projection::Float { observed },
+        (Projection::Unfloat { placed }, payloads) => Projection::Unfloat {
+            placed: attach_placed(placed, payloads)?,
+        },
+        (Projection::Tile { placed }, payloads) => Projection::Tile {
+            placed: attach_placed(placed, payloads)?,
+        },
+        (Projection::Toward { direction, width, .. }, Payloads { layout: Some(layout), .. }) => {
+            Projection::Toward { direction, width, layout }
+        }
+        (Projection::Toward { .. }, payloads) => return Err(payloads),
+    };
+    Ok(Relocation::Move { assign, projection, afterwards })
+}
+
+/// The `chosen` plan (a token plan, the Rust core's or a twin's) with the engine's payloads put
+/// back from `facts`; where it names a payload the facts do not hold, the Rust core's plan
+/// stands (the difference is reported where the plan was chosen, with [`holds`]).
+pub fn relocation_as<K: Copy + PartialEq, S: Copy + PartialEq, D: Copy, T, L>(
+    facts: RelocationFacts<K, S, D, T, L>,
+    chosen: Relocation<D, (), ()>,
+) -> Relocation<D, T, L> {
+    let (shape, payloads) = facts.split();
+    match attach(chosen, payloads) {
+        Ok(plan) => plan,
+        Err(payloads) => relocation(shape.with(payloads)),
+    }
+}
+
 /// Why a window observed on a Space is not added to a layout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Skipped {
@@ -1442,6 +1655,71 @@ mod tests {
             width: Width::Preserve,
             layout: 'L'
         });
+    }
+
+    /// A token plan gets the engine's payloads back; one naming a payload the facts lack is not
+    /// taken: the Rust plan stands (and `holds` says so, for the report).
+    #[test]
+    fn a_chosen_relocation_gets_its_payloads_or_the_rust_plan_stands() {
+        let tiled = |placed| Relocation::<u8, (), ()>::Move {
+            assign: Assign::Assign,
+            projection: Projection::Tile { placed },
+            afterwards: Afterwards::AsIs,
+        };
+        // The Rust plan's own tokens come back with the payloads, as the plan itself.
+        for facts in [
+            moving(Policy::Workspace),
+            moving(Policy::Drop(Edited::Tree("tree"))),
+            RelocationFacts {
+                layout: None,
+                ..moving(Policy::Workspace)
+            },
+            moving(Policy::Directional(3)),
+        ] {
+            let tokens = relocation(facts.tokens());
+            assert!(holds(&facts, &tokens));
+            assert_eq!(relocation_as(facts, tokens), relocation(facts));
+        }
+        // A twin's plan with payloads the facts hold is taken, payloads put back.
+        let facts = moving(Policy::Drop(Edited::Tree("tree")));
+        let chosen = tiled(Placed::Add {
+            layout: (),
+            width: Width::Preserve,
+        });
+        assert!(holds(&facts, &chosen));
+        assert_eq!(relocation_as(facts, chosen), Relocation::Move {
+            assign: Assign::Assign,
+            projection: Projection::Tile {
+                placed: Placed::Add {
+                    layout: 'L',
+                    width: Width::Preserve
+                }
+            },
+            afterwards: Afterwards::AsIs,
+        });
+        // Naming a tree the facts do not have, or a layout they do not have: the Rust plan.
+        let no_tree = moving(Policy::Workspace);
+        let edited = tiled(Placed::Edited { tree: (), width: Width::AsIs });
+        assert!(!holds(&no_tree, &edited));
+        assert_eq!(relocation_as(no_tree, edited), relocation(no_tree));
+        let no_layout = RelocationFacts {
+            layout: None,
+            ..moving(Policy::Workspace)
+        };
+        let added = tiled(Placed::Add { layout: (), width: Width::AsIs });
+        assert!(!holds(&no_layout, &added));
+        assert_eq!(relocation_as(no_layout, added), relocation(no_layout));
+        let toward = Relocation::<u8, (), ()>::Move {
+            assign: Assign::Assign,
+            projection: Projection::Toward {
+                direction: 3,
+                width: Width::AsIs,
+                layout: (),
+            },
+            afterwards: Afterwards::AsIs,
+        };
+        assert!(!holds(&no_layout, &toward));
+        assert_eq!(relocation_as(no_layout, toward), relocation(no_layout));
     }
 
     #[test]

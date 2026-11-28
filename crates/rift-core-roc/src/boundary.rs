@@ -4213,6 +4213,164 @@ impl Drop for CamerasBox {
 }
 
 // ---------------------------------------------------------------------------------------------
+// The layout engine's relocation (its token form).
+
+fn family_wire(f: rift_core::placement::Family) -> abi::BoundaryFamilyWire {
+    use rift_core::placement::Family as F;
+    match f {
+        F::Floating => abi::BoundaryFamilyWire::Floating,
+        F::Scrolling => abi::BoundaryFamilyWire::Scrolling,
+        F::Tiled => abi::BoundaryFamilyWire::Tiled,
+    }
+}
+
+pub(crate) fn engine_relocation_facts(
+    f: rift_core::placement::RelocationFacts<u64, u64, TreeDirection, (), ()>,
+) -> abi::BoundaryRelocationFactsWire {
+    use rift_core::placement::{Edited, Policy};
+    let policy = {
+        use abi::BoundaryPolicyWireTag as T;
+        match f.policy {
+            Policy::Workspace => union!(
+                BoundaryPolicyWire,
+                BoundaryPolicyWirePayload.workspace,
+                T::Workspace
+            ),
+            Policy::Observed => union!(
+                BoundaryPolicyWire,
+                BoundaryPolicyWirePayload.observed,
+                T::Observed
+            ),
+            Policy::Drop(edited) => union!(
+                BoundaryPolicyWire,
+                BoundaryPolicyWirePayload.drop(match edited {
+                    Edited::Tree(()) => abi::BoundaryEditedToken::Tree,
+                    Edited::NoTree => abi::BoundaryEditedToken::NoTree,
+                }),
+                T::Drop
+            ),
+            Policy::Directional(d) => union!(
+                BoundaryPolicyWire,
+                BoundaryPolicyWirePayload.directional(tree_direction(d)),
+                T::Directional
+            ),
+        }
+    };
+    let families = {
+        use abi::BoundaryMaybeFamiliesTag as T;
+        match f.families {
+            Some((source, destination)) => union!(
+                BoundaryMaybeFamilies,
+                BoundaryMaybeFamiliesPayload.families(abi::BoundaryFamiliesWire {
+                    source: family_wire(source),
+                    destination: family_wire(destination),
+                }),
+                T::Families
+            ),
+            None => union!(
+                BoundaryMaybeFamilies,
+                BoundaryMaybeFamiliesPayload.unknown,
+                T::Unknown
+            ),
+        }
+    };
+    abi::BoundaryRelocationFactsWire {
+        policy,
+        source: f.source,
+        destination: f.destination,
+        families,
+        space: f.space,
+        destination_space: maybe_word(f.destination_space),
+        owner: maybe_word(f.owner),
+        projected_floating: f.projected_floating,
+        in_floats: f.in_floats,
+        has_layout: f.layout.is_some(),
+        preserve_widths: f.preserve_widths,
+        unavailable: f.unavailable,
+        placeable: f.placeable,
+    }
+}
+
+pub(crate) fn engine_relocation_plan(
+    plan: abi::BoundaryRelocationWire,
+) -> rift_core::placement::Relocation<TreeDirection, (), ()> {
+    use rift_core::placement::{
+        Afterwards, Assign, Observed, Placed, Projection, Relocation, RelocationRefusal as R, Width,
+    };
+    let width = |w: abi::BoundaryWidthWire| match w {
+        abi::BoundaryWidthWire::Preserve => Width::Preserve,
+        abi::BoundaryWidthWire::AsIs => Width::AsIs,
+    };
+    // SAFETY: each arm reads the payload its tag names.
+    match plan.tag {
+        abi::BoundaryRelocationWireTag::Refused => {
+            Relocation::Refused(match unsafe { *plan.borrow_payload_refused_unchecked() } {
+                abi::BoundaryRelocationRefusalWire::UnknownWorkspace => R::UnknownWorkspace,
+                abi::BoundaryRelocationRefusalWire::OtherSpace => R::OtherSpace,
+                abi::BoundaryRelocationRefusalWire::OwnedElsewhere => R::OwnedElsewhere,
+                abi::BoundaryRelocationRefusalWire::DirectionalWithoutLayout => {
+                    R::DirectionalWithoutLayout
+                }
+            })
+        }
+        abi::BoundaryRelocationWireTag::Move => {
+            let m = unsafe { plan.borrow_payload_move_unchecked() };
+            let projection = match m.projection.tag {
+                abi::BoundaryProjectionWireTag::Float => Projection::Float {
+                    observed: match unsafe { *m.projection.borrow_payload_float_unchecked() } {
+                        abi::BoundaryObservedWire::WasMember => Observed::WasMember,
+                        abi::BoundaryObservedWire::Moved => Observed::Moved,
+                    },
+                },
+                abi::BoundaryProjectionWireTag::Unfloat => Projection::Unfloat {
+                    placed: match unsafe { *m.projection.borrow_payload_unfloat_unchecked() } {
+                        abi::BoundaryPlacedToken::Edited => Placed::Edited { tree: (), width: () },
+                        abi::BoundaryPlacedToken::Add => Placed::Add { layout: (), width: () },
+                        abi::BoundaryPlacedToken::NoLayout => Placed::NoLayout,
+                    },
+                },
+                abi::BoundaryProjectionWireTag::Tile => {
+                    let p = unsafe { m.projection.borrow_payload_tile_unchecked() };
+                    Projection::Tile {
+                        placed: match p.tag {
+                            abi::BoundaryPlacedWidthTag::Edited => Placed::Edited {
+                                tree: (),
+                                width: width(unsafe { *p.borrow_payload_edited_unchecked() }),
+                            },
+                            abi::BoundaryPlacedWidthTag::Add => Placed::Add {
+                                layout: (),
+                                width: width(unsafe { *p.borrow_payload_add_unchecked() }),
+                            },
+                            abi::BoundaryPlacedWidthTag::NoLayout => Placed::NoLayout,
+                        },
+                    }
+                }
+                abi::BoundaryProjectionWireTag::Toward => {
+                    let t = unsafe { m.projection.borrow_payload_toward_unchecked() };
+                    Projection::Toward {
+                        direction: from_direction(t.direction),
+                        width: width(t.width),
+                        layout: (),
+                    }
+                }
+            };
+            Relocation::Move {
+                assign: match m.assign {
+                    abi::BoundaryAssignWire::Already => Assign::Already,
+                    abi::BoundaryAssignWire::Assign => Assign::Assign,
+                },
+                projection,
+                afterwards: match m.afterwards {
+                    abi::BoundaryAfterwardsWire::Suspended => Afterwards::Suspended,
+                    abi::BoundaryAfterwardsWire::Resumed => Afterwards::Resumed,
+                    abi::BoundaryAfterwardsWire::AsIs => Afterwards::AsIs,
+                },
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
 // The layout engine's drop choices.
 
 type DropActionOf = rift_core::placement::WindowDropAction<TreeDirection>;

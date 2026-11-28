@@ -1399,7 +1399,25 @@ times are within run-to-run noise. The gain is the Roc build, about 35 s off eve
 Roc source change. `roc/bump.sh` probes the repro under dev, size and `speed --specialize=no`, so a
 bump says when Boxy's bug is fixed.
 
-- Next: E1c-4b (relocation in Roc).
+**E1c-4b (2026-11-28): relocation decides in Roc.** The drop's tree is neither `Clone` nor
+`PartialEq`, so it cannot ride a plan a twin may override. Both cores decide on the facts' token
+form (`RelocationFacts::tokens`: the tree and the layout as present or absent; the engine's
+`relocating`, `roc_path::decided` comparing token plans, family `PLACEMENT`). A Roc plan naming a
+tree or layout the facts do not hold is reported (`holds`, in the read-back). Then
+`relocation_as(facts, chosen)` splits the real facts into their shape and payloads
+(`RelocationFacts::split`, `Payloads`), attaches the payloads by matching plan and payloads by
+value, and where the plan names one they lack, the payloads come back and the Rust plan is computed
+from the reassembled facts: total, with no unwrap. A separate Roc entry (`roc_engine_relocation`,
+in `EnginePlacement.roc`), since relocation is one kind of question.
+- Differential (`rift-core-roc/tests/placement.rs`): 20 000 random token facts (every policy, owners
+  the source, the destination or a third, every pair of families, layouts and trees present or
+  not); check-fast cuts it to 2000.
+- Tests: reattachment and the fallback (rift-core); relocation through the engine's door with each
+  payload (the drop's tree, the destination's layout, a directional move's layout, no layout).
+- Plants 11/11, among them the part's payload plant: a Roc plan adding to a layout the facts do not
+  hold, caught at the engine's door.
+
+- Next: E1c-4c (the rest of E1c in Roc).
 
 **Pruning (the lead, 2026-11-26):** at a milestone, delete only what no future build reuses:
 stale `target/roc-build` keys (all but the current sources', which the build script's line

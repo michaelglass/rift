@@ -2528,6 +2528,16 @@ pub mod placement {
         // SAFETY: the question is handed to Roc, which consumes it; the choice is plain data.
         boundary::engine_drop_choice(unsafe { abi::roc_engine_drop(question) })
     }
+
+    /// What relocating a window does (`rift_core::placement::relocation`), on the facts' token
+    /// form: the engine puts its payloads back (`rift_core::placement::relocation_as`).
+    pub fn engine_relocation(
+        facts: rift_core::placement::RelocationFacts<u64, u64, Direction, (), ()>,
+    ) -> rift_core::placement::Relocation<Direction, (), ()> {
+        let facts = boundary::engine_relocation_facts(facts);
+        // SAFETY: the facts are plain data; so is the plan.
+        boundary::engine_relocation_plan(unsafe { abi::roc_engine_relocation(facts) })
+    }
 }
 
 pub mod workspaces {

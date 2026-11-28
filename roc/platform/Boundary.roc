@@ -1021,6 +1021,45 @@ Boundary := [].{
 
 	NativeBatchView := [Idle, Collecting(List(U64))]
 
+	# The layout engine's relocation (`rift_core::placement::relocation`), on the facts' token
+	# form: workspaces and Spaces are one word each; the drop's tree and the destination's layout
+	# are tokens.
+
+	FamilyWire := [Floating, Scrolling, Tiled]
+
+	FamiliesWire := { source : FamilyWire, destination : FamilyWire }
+
+	MaybeFamilies := [Unknown, Families(FamiliesWire)]
+
+	EditedToken := [Tree, NoTree]
+
+	PolicyWire := [Workspace, Observed, Drop(EditedToken), Directional(BspDirection)]
+
+	RelocationFactsWire := { policy : PolicyWire, source : U64, destination : U64, families : MaybeFamilies, space : U64, destination_space : MaybeWord, owner : MaybeWord, projected_floating : Bool, in_floats : Bool, has_layout : Bool, preserve_widths : Bool, unavailable : Bool, placeable : Bool }
+
+	RelocationRefusalWire := [UnknownWorkspace, OtherSpace, OwnedElsewhere, DirectionalWithoutLayout]
+
+	AssignWire := [Already, Assign]
+
+	WidthWire := [Preserve, AsIs]
+
+	PlacedWidth := [Edited(WidthWire), Add(WidthWire), NoLayout]
+
+	PlacedToken := [Edited, Add, NoLayout]
+
+	ObservedWire := [WasMember, Moved]
+
+	TowardWire := { direction : BspDirection, width : WidthWire }
+
+	ProjectionWire := [Float(ObservedWire), Unfloat(PlacedToken), Tile(PlacedWidth), Toward(TowardWire)]
+
+	AfterwardsWire := [Suspended, Resumed, AsIs]
+
+	MoveWire := { assign : AssignWire, projection : ProjectionWire, afterwards : AfterwardsWire }
+
+	## What relocating a window does (its token form).
+	RelocationWire := [Refused(RelocationRefusalWire), Move(MoveWire)]
+
 	# The layout engine's drop choices (`rift_core::placement::choose_drop`): windows and
 	# workspaces are one word each; the place and the trees the engine holds are tokens.
 

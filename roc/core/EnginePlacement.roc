@@ -3,7 +3,7 @@
 ## drop edits a layout). Questions on plain data; windows and workspaces are one word each, and
 ## payloads the engine holds (the place, the trees) are tokens.
 
-import pf.Boundary exposing [DropQuestion, DropChoice, DropFactsWire, DropActionWire, Rect, MaybeRect, MaybeSlot, AcrossWire]
+import pf.Boundary exposing [DropQuestion, DropChoice, DropFactsWire, DropActionWire, Rect, MaybeRect, MaybeSlot, AcrossWire, RelocationFactsWire, RelocationWire, FamilyWire, EditedToken, WidthWire, ObservedWire, ProjectionWire]
 
 EnginePlacement := [].{
 
@@ -35,6 +35,104 @@ EnginePlacement := [].{
 					Floating => Edit(Refused)
 					_ => Edit(Edit)
 				}
+		}
+
+	## What relocating a window does (`rift_core::placement::relocation`), on the facts' token form.
+	relocation : RelocationFactsWire -> RelocationWire
+	relocation = |f|
+		match f.families {
+			Unknown => Refused(UnknownWorkspace)
+			Families(families) => {
+				observed = match f.policy {
+					Observed => True
+					_ => False
+				}
+				commanded = match f.policy {
+					Workspace => True
+					_ => False
+				}
+				on_space =
+					match f.destination_space {
+						Some(space) => space == f.space
+						Nothing => False
+					}
+				owned_elsewhere =
+					match f.owner {
+						Some(owner) => owner != f.source and !(observed and owner == f.destination)
+						Nothing => False
+					}
+				directional_without_layout = match f.policy {
+					Directional(_) => !f.has_layout
+					_ => False
+				}
+				if !on_space {
+					Refused(OtherSpace)
+				} else if owned_elsewhere {
+					Refused(OwnedElsewhere)
+				} else if directional_without_layout {
+					Refused(DirectionalWithoutLayout)
+				} else {
+					width = |laid| if is_scrolling(families.destination) and f.preserve_widths and laid Preserve else AsIs
+					floating_layouts = is_floating(families.source) or is_floating(families.destination)
+					into_floating_layout = is_floating(families.destination)
+					projection : ProjectionWire
+					projection =
+						match f.policy {
+							Directional(direction) => Toward({ direction, width: width(True) })
+							Workspace => projected(f.in_floats and !floating_layouts, Moved, into_floating_layout, NoTree, width(f.has_layout), f.has_layout)
+							Observed => projected(f.projected_floating, WasMember, into_floating_layout, NoTree, width(f.has_layout), f.has_layout)
+							Drop(edited) => projected(f.projected_floating, Moved, into_floating_layout, edited, width(f.has_layout), f.has_layout)
+						}
+					assign =
+						match f.owner {
+							Some(owner) => if owner == f.destination Already else Assign
+							Nothing => Assign
+						}
+					afterwards =
+						if f.unavailable or (commanded and !f.placeable) {
+							Suspended
+						} else if observed {
+							Resumed
+						} else {
+							AsIs
+						}
+					Move({ assign, projection, afterwards })
+				}
+			}
+		}
+
+	is_floating : FamilyWire -> Bool
+	is_floating = |family|
+		match family {
+			Floating => True
+			_ => False
+		}
+
+	is_scrolling : FamilyWire -> Bool
+	is_scrolling = |family|
+		match family {
+			Scrolling => True
+			_ => False
+		}
+
+	projected : Bool, ObservedWire, Bool, EditedToken, WidthWire, Bool -> ProjectionWire
+	projected = |floating, observed, into_floating_layout, edited, width, has_layout|
+		if floating and !into_floating_layout {
+			Float(observed)
+		} else if floating {
+			Unfloat(
+				match edited {
+					Tree => Edited
+					NoTree => if has_layout Add else NoLayout
+				},
+			)
+		} else {
+			Tile(
+				match edited {
+					Tree => Edited(width)
+					NoTree => if has_layout Add(width) else NoLayout
+				},
+			)
 		}
 
 	usable : Rect -> Bool

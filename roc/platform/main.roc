@@ -24,6 +24,7 @@ platform ""
 			engine_focus : FocusQuestion -> FocusChoice,
 			engine_switching : SwitchQuestion -> SwitchChoice,
 			engine_drop : DropQuestion -> DropChoice,
+			engine_relocation : RelocationFactsWire -> RelocationWire,
 			untracked_focus : UntrackedQuestion -> UntrackedAnswer,
 			focuses_desktop : DesktopQuestion -> VerdictAnswer,
 			discovered_space : DiscoveredQuestion -> DiscoveredAnswer,
@@ -211,6 +212,7 @@ platform ""
 		"roc_engine_focus": engine_focus_for_host,
 		"roc_engine_switching": engine_switching_for_host,
 		"roc_engine_drop": engine_drop_for_host,
+		"roc_engine_relocation": engine_relocation_for_host,
 		"roc_untracked_focus": untracked_focus_for_host,
 		"roc_focuses_desktop": focuses_desktop_for_host,
 		"roc_discovered_space": discovered_space_for_host,
@@ -247,7 +249,7 @@ platform ""
 		},
 	}
 
-import Boundary exposing [AxisQuestion, TranslateQuestion, FloatingLayout, BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, Rect, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer, Admission, AdmitQuestion, CandidatesAnswer, CandidatesQuestion, DiscoveredAnswer, DiscoveredQuestion, DiscoveryAnswer, DiscoveryQuestion, AdmissionFacts, Change, InventoryQuestion, KeepsTransientQuestion, MisplacedQuestion, NativeTransientQuestion, NetQuestion, OutOfViewQuestion, PointerTargetQuestion, PresenceAnswer, PresenceQuestion, ReadAnswer, ReadQuestion, RetirementAnswer, RuleRefreshQuestion, RuleTargetsAnswer, RuleTargetsQuestion, SpaceAnswer, TitleChangeQuestion, VerdictAnswer, WindowAdmission, JoinedQuestion, JoinedView, PreviousQuestion, Reached, ResolveQuestion, StepQuestion, MaybeWord, Event, Effect, ReachedAnswer, EligibleQuestion, LifecycleEvent, PresentWindow, Invalidation, Revalidation, OwnershipEvent, Owned, WindowOwnership, WorkspaceSpace, SpaceActivation, JoinedEvent, Outcome, WorkspaceWindows, ModesQuestion, ModeVerdict, MainWindowEvent, NativeFocus, MainApp, SizesEvent, SizeRecord, AppMinimum, FloatsEvent, FloatFullscreenEntry, FloatFrameEntry, DisplayEvent, SpaceDisplay, EvictionEvent, EvictionRecord, CamerasEvent, CamAnswer, CamEntry, NativeEvent, NativeAnswer, NativeBatchView, FocusQuestion, FocusChoice, SwitchQuestion, SwitchChoice, DropQuestion, DropChoice, EmitsQuestion, QuarantineQuestion, TargetQuestion, TargetAnswer, RaiseQuestion, RaiseAnswer, BspTreeSeed, BspInsertion, BspTreeEvent, BspTreeAnswer, BspLayoutSlot, BspNodeSlot, BspTreeNode, Aspect, BspFramesQuestion, StackSettings, StackTreeSeed, StackTreeEvent, StackTreeAnswer, StackLayoutSlot, StackFramesQuestion, TraditionalSettings, TraditionalSeed, TraditionalEvent, MasterSettings, MasterStackSeed, MasterStackEvent, GroupLayoutQuestion, GroupLayoutAnswer, FloatingSeed, FloatingEvent, FloatingAnswer, FloatingLayoutQuestion, FloatingLayoutAnswer, ColumnsSettings, ColumnsSeed, ColumnsEvent, ColumnsAnswer]
+import Boundary exposing [AxisQuestion, TranslateQuestion, FloatingLayout, BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, Rect, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer, Admission, AdmitQuestion, CandidatesAnswer, CandidatesQuestion, DiscoveredAnswer, DiscoveredQuestion, DiscoveryAnswer, DiscoveryQuestion, AdmissionFacts, Change, InventoryQuestion, KeepsTransientQuestion, MisplacedQuestion, NativeTransientQuestion, NetQuestion, OutOfViewQuestion, PointerTargetQuestion, PresenceAnswer, PresenceQuestion, ReadAnswer, ReadQuestion, RetirementAnswer, RuleRefreshQuestion, RuleTargetsAnswer, RuleTargetsQuestion, SpaceAnswer, TitleChangeQuestion, VerdictAnswer, WindowAdmission, JoinedQuestion, JoinedView, PreviousQuestion, Reached, ResolveQuestion, StepQuestion, MaybeWord, Event, Effect, ReachedAnswer, EligibleQuestion, LifecycleEvent, PresentWindow, Invalidation, Revalidation, OwnershipEvent, Owned, WindowOwnership, WorkspaceSpace, SpaceActivation, JoinedEvent, Outcome, WorkspaceWindows, ModesQuestion, ModeVerdict, MainWindowEvent, NativeFocus, MainApp, SizesEvent, SizeRecord, AppMinimum, FloatsEvent, FloatFullscreenEntry, FloatFrameEntry, DisplayEvent, SpaceDisplay, EvictionEvent, EvictionRecord, CamerasEvent, CamAnswer, CamEntry, NativeEvent, NativeAnswer, NativeBatchView, FocusQuestion, FocusChoice, SwitchQuestion, SwitchChoice, DropQuestion, DropChoice, RelocationFactsWire, RelocationWire, EmitsQuestion, QuarantineQuestion, TargetQuestion, TargetAnswer, RaiseQuestion, RaiseAnswer, BspTreeSeed, BspInsertion, BspTreeEvent, BspTreeAnswer, BspLayoutSlot, BspNodeSlot, BspTreeNode, Aspect, BspFramesQuestion, StackSettings, StackTreeSeed, StackTreeEvent, StackTreeAnswer, StackLayoutSlot, StackFramesQuestion, TraditionalSettings, TraditionalSeed, TraditionalEvent, MasterSettings, MasterStackSeed, MasterStackEvent, GroupLayoutQuestion, GroupLayoutAnswer, FloatingSeed, FloatingEvent, FloatingAnswer, FloatingLayoutQuestion, FloatingLayoutAnswer, ColumnsSettings, ColumnsSeed, ColumnsEvent, ColumnsAnswer]
 
 ## The entries' results: each machine's box and what its step answers. They name the
 ## platform's model variables, so they live here, not in `Boundary`.
@@ -443,6 +445,10 @@ engine_switching_for_host = |question| (core.engine_switching)(question)
 ## One of the layout engine's drop choices (`rift_core::placement::choose_drop`).
 engine_drop_for_host : DropQuestion -> DropChoice
 engine_drop_for_host = |question| (core.engine_drop)(question)
+
+## What relocating a window does (`rift_core::placement::relocation`, token form).
+engine_relocation_for_host : RelocationFactsWire -> RelocationWire
+engine_relocation_for_host = |facts| (core.engine_relocation)(facts)
 
 ## What to do about the untracked window under the cursor.
 untracked_focus_for_host : UntrackedQuestion -> UntrackedAnswer

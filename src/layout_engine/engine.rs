@@ -4095,6 +4095,38 @@ impl LayoutEngine {
             })
     }
 
+    /// A relocation's plan: both cores decide on the facts' token form, Roc's plan taken under
+    /// `roc-core` (a difference reported, as is a plan naming a tree or layout the facts do not
+    /// hold); then the engine's tree and layout are put back (`relocation_as`, under which a plan
+    /// naming a payload the facts lack leaves the Rust plan standing).
+    fn relocating(
+        facts: RelocationFacts<VirtualWorkspaceId, SpaceId, Direction, LayoutSystemKind, LayoutId>,
+    ) -> Relocation<Direction, LayoutSystemKind, LayoutId> {
+        let tokens = facts.tokens();
+        let chosen = rift_core::placement::relocation(tokens);
+        #[cfg(feature = "roc-core")]
+        let chosen = {
+            use super::systems::{core_direction, engine_direction};
+            use crate::roc_path::Word;
+            let words = tokens.map(Word::word, Word::word, core_direction);
+            let roc = rift_core_roc::placement::engine_relocation(words);
+            crate::roc_path::decided(
+                &crate::roc_path::PLACEMENT,
+                "engine_relocation",
+                &[],
+                &words,
+                chosen,
+                &chosen.map(core_direction),
+                Ok(roc),
+                |roc| {
+                    let roc = roc.map(engine_direction);
+                    rift_core::placement::holds(&tokens, &roc).then_some(roc)
+                },
+            )
+        };
+        rift_core::placement::relocation_as(facts, chosen)
+    }
+
     /// What a relocation is decided from.
     fn relocation_facts(
         &self,
@@ -4132,7 +4164,7 @@ impl LayoutEngine {
     ) -> bool {
         let facts =
             self.relocation_facts(windows.read(), source, (space, destination), window, policy);
-        let (assign, projection, afterwards) = match rift_core::placement::relocation(facts) {
+        let (assign, projection, afterwards) = match Self::relocating(facts) {
             Relocation::Refused(reason) => {
                 debug!(?reason, ?window, "relocation refused");
                 return false;
@@ -5164,6 +5196,57 @@ mod tests {
         id: VirtualWorkspaceId,
     ) -> LayoutId {
         engine.workspaces.reading(store.view()).active_layout(space, id).unwrap()
+    }
+
+    /// Relocation through the engine's door, each payload put back: the drop's tree, the
+    /// destination's layout, a directional move's layout; with no layout, nothing to insert.
+    /// Under `roc-core` the Roc core decides too (a difference, or a plan naming a payload the
+    /// facts do not hold, fails here).
+    #[test]
+    fn each_relocation_gets_its_payloads_through_the_door() {
+        let (engine, store, space, a, b, window) =
+            relocation_fixture(LayoutMode::Traditional, false);
+        let facts = |policy| engine.relocation_facts(store.view(), a, (space, b), window, policy);
+        let layout = layout_of(&engine, &store, space, b);
+        let tree = engine.workspaces[a].layout_system.preview_clone().unwrap();
+        let plan = LayoutEngine::relocating(facts(WindowRelocation::Drop(Edited::Tree(tree))));
+        assert!(matches!(plan, Relocation::Move {
+            projection: Projection::Tile { placed: Placed::Edited { .. } },
+            ..
+        }));
+        let plan = LayoutEngine::relocating(facts(WindowRelocation::Workspace));
+        assert!(matches!(
+            plan,
+            Relocation::Move {
+                assign: Assign::Assign,
+                projection: Projection::Tile { placed: Placed::Add { layout: l, width: Width::AsIs } },
+                afterwards: Afterwards::AsIs,
+            } if l == layout
+        ));
+        let plan = LayoutEngine::relocating(facts(WindowRelocation::Directional(Direction::Left)));
+        assert!(matches!(
+            plan,
+            Relocation::Move {
+                projection: Projection::Toward { direction: Direction::Left, layout: l, .. },
+                ..
+            } if l == layout
+        ));
+        let unlaid = RelocationFacts {
+            layout: None,
+            ..facts(WindowRelocation::Workspace)
+        };
+        assert!(matches!(LayoutEngine::relocating(unlaid), Relocation::Move {
+            projection: Projection::Tile { placed: Placed::NoLayout },
+            ..
+        }));
+        let unlaid = RelocationFacts {
+            layout: None,
+            ..facts(WindowRelocation::Directional(Direction::Up))
+        };
+        assert!(matches!(
+            LayoutEngine::relocating(unlaid),
+            Relocation::Refused(rift_core::placement::RelocationRefusal::DirectionalWithoutLayout)
+        ));
     }
 
     /// A floating window a command moves stays floating, its focus dropped and remembered as
