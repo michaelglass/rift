@@ -2,7 +2,8 @@
 # The check runs. `roc/check.sh` (`mise run check`) is the full run, the publish gate: fmt,
 # `cargo check --locked` with and without `roc-core`, every test (the workspace, the lib with
 # `roc-core`, the Roc crate's differentials, rift-core), the drag fuzzer at 2000 x 40 both ways,
-# and clippy with `roc-core`. `roc/check.sh fast` (`mise run check-fast`) is the inner loop: fmt,
+# and clippy with `roc-core`, gated: a warning not in roc/clippy-baseline.txt fails it, and so does
+# one the baseline lists that is gone (shrink the baseline in the same commit). `roc/check.sh fast` (`mise run check-fast`) is the inner loop: fmt,
 # the `roc-core` check, the lib with `roc-core`, rift-core-roc and rift-core, each drawn test cut
 # to the counts in FAST_CUTS; it is not a publish gate.
 #
@@ -114,11 +115,20 @@ run build-core cargo nextest run -p rift-core --no-run
 if [ "$mode" = full ]; then
     run build-lib cargo test --lib --no-run --message-format=json
     run build-workspace cargo nextest run --workspace --no-run
-    cargo clippy --all-targets --features roc-core >"$logs/clippy.log" 2>&1
+    # The gate: the workspace's own crates re-linted every run, so the count never depends on the
+    # cache (clippy's arguments are in the fingerprint of the workspace's crates only, so a new
+    # nonce re-lints exactly them; dependencies, build scripts and the test builds stay as they
+    # are), and every warning checked against roc/clippy-baseline.txt, which only shrinks
+    # (roc/clippy_gate.py).
+    nonce=$(date +%s)$$
+    cargo clippy --all-targets --features roc-core --message-format=json -- \
+        --cfg "clippy_gate=\"$nonce\"" --check-cfg 'cfg(clippy_gate, values(any()))' \
+        >"$logs/clippy.json" 2>"$logs/clippy.log"
     status=$?
-    warnings=$(grep -E '^(warning|error)' "$logs/clippy.log" | grep -cv generated)
-    echo "clippy: exit $status $warnings (errors $(grep -c '^error' "$logs/clippy.log"))"
-    [ "$status" -eq 0 ] || failed=1
+    python3 roc/clippy_gate.py check "$logs/clippy.json" roc/clippy-baseline.txt >>"$logs/clippy.log" 2>&1
+    gate=$?
+    echo "clippy: exit $status, gate $gate: $(tail -1 "$logs/clippy.log")"
+    [ "$status" -eq 0 ] && [ "$gate" -eq 0 ] || failed=1
 fi
 lib_roc=$(executable "$logs/build-lib-roc.log")
 

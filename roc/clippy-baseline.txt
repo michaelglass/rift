@@ -1,0 +1,247 @@
+# The workspace's clippy warnings: count, lint, file, item. Only ever shrinks
+# (roc/clippy_gate.py; roc/check.sh fails on anything not listed here).
+1	clippy::arc_with_non_send_sync	src/sys/observer.rs	fn subscription_context
+2	clippy::arc_with_non_send_sync	src/sys/timer.rs	pub fn new
+1	clippy::await_holding_refcell_ref	src/actor/app.rs	async fn wait_for_activation
+1	clippy::await_holding_refcell_ref	src/actor/app.rs	static MUTEX: LazyLock<parking_lot::Mutex<
+1	clippy::bool_assert_comparison	src/actor/reactor/tests.rs	enum Pointer
+1	clippy::bool_assert_comparison	src/actor/reactor/tests.rs	fn a_window_crossing_a_display_before_its_drag_registers_is_not_snapped_back
+1	clippy::bool_assert_comparison	src/sys/executor.rs	fn drop
+1	clippy::borrow_deref_ref	src/actor/wm_controller.rs	fn as_array
+1	clippy::clone_on_copy	src/actor/reactor.rs	fn auto_switch_target
+1	clippy::clone_on_copy	src/actor/reactor.rs	fn discovery_spaces_for_window
+1	clippy::clone_on_copy	src/actor/reactor.rs	fn focus_desktop_if_active_workspace_empty
+1	clippy::clone_on_copy	src/actor/reactor.rs	fn focus_untracked_window_under_cursor
+1	clippy::clone_on_copy	src/actor/reactor.rs	fn request_refocus_if_hidden
+1	clippy::clone_on_copy	src/actor/reactor.rs	fn sync_native_admission
+1	clippy::clone_on_copy	src/actor/reactor/tests.rs	fn overview_cross_display_drop_arranges_only_source_and_destination_spaces
+1	clippy::clone_on_copy	src/actor/reactor/tests.rs	fn overview_selects_exact_display_workspace_without_back_and_forth
+1	clippy::cloned_ref_to_slice_refs	src/ui/settings/commands/arguments.rs	pub
+1	clippy::cloned_ref_to_slice_refs	src/ui/settings/commands/arguments/structured.rs	pub
+2	clippy::collapsible_if	crates/rift-config-derive/src/lib.rs	fn docs
+1	clippy::collapsible_if	src/actor/app.rs	fn id_with_identity
+1	clippy::collapsible_if	src/actor/input.rs	fn refresh_ffm_paused
+1	clippy::collapsible_if	src/actor/input.rs	pub async fn run
+2	clippy::collapsible_if	src/actor/raise_manager.rs	fn handle_message
+1	clippy::collapsible_if	src/actor/raise_manager.rs	fn process_queued_responses
+1	clippy::collapsible_if	src/actor/raise_manager.rs	pub async fn run
+1	clippy::collapsible_if	src/actor/reactor.rs	fn apply_event_outcome
+1	clippy::collapsible_if	src/actor/reactor.rs	fn current_screen_center
+2	clippy::collapsible_if	src/actor/reactor.rs	fn finalize_space_change
+1	clippy::collapsible_if	src/actor/reactor.rs	fn handle_authoritative_space_snapshot
+1	clippy::collapsible_if	src/actor/reactor.rs	fn handle_layout_response
+1	clippy::collapsible_if	src/actor/reactor.rs	fn request_close_window
+1	clippy::collapsible_if	src/actor/reactor/events/command.rs	pub fn handle_command_layout
+1	clippy::collapsible_if	src/actor/reactor/events/space.rs	pub fn handle_window_server_appeared
+1	clippy::collapsible_if	src/actor/reactor/gesture.rs	pub
+1	clippy::collapsible_if	src/actor/reactor/query.rs	pub fn query_workspaces
+1	clippy::collapsible_if	src/actor/reactor/utils.rs	pub
+3	clippy::collapsible_if	src/common/config/types.rs	fn field
+1	clippy::collapsible_if	src/common/config/types.rs	pub fn bind_replacing
+1	clippy::collapsible_if	src/common/config/types.rs	pub fn effective_for_display
+1	clippy::collapsible_if	src/ipc/subscriptions.rs	pub fn unsubscribe_client
+1	clippy::collapsible_if	src/model/space_activation.rs	pub fn on_spaces_updated
+2	clippy::collapsible_if	src/model/virtual_workspace.rs	pub
+1	clippy::collapsible_if	src/model/window_store.rs	pub
+1	clippy::collapsible_if	src/sys/event_tap.rs	unsafe fn trampoline_drop
+2	clippy::collapsible_if	src/sys/hotkey.rs	fn from_str
+1	clippy::collapsible_if	src/sys/screen.rs	fn notch_height
+1	clippy::collapsible_if	src/sys/screen.rs	pub fn managed_display_space_ids
+1	clippy::collapsible_if	src/sys/service.rs	fn bundle_executable
+1	clippy::collapsible_if	src/sys/service.rs	fn find_rift_executable
+1	clippy::collapsible_if	src/ui/menu_bar.rs	pub fn update
+1	clippy::collapsible_if	src/ui/mission_control.rs	fn stopped
+1	clippy::collapsible_if	src/ui/mission_control.rs	pub
+1	clippy::collapsible_if	src/ui/settings/commands.rs	fn inspect
+1	clippy::collapsible_if	src/ui/settings/commands.rs	fn open_editor
+1	clippy::collapsible_if	src/ui/settings/commands.rs	fn recorder
+1	clippy::collapsible_if	src/ui/settings/commands.rs	fn reset_mode
+2	clippy::collapsible_if	src/ui/settings/commands.rs	fn row_controls
+1	clippy::collapsible_if	src/ui/settings/mod.rs	fn open_search
+1	clippy::collapsible_if	src/ui/settings/native_tests.rs	fn named<T: objc2::DowncastTarget + 'static>
+1	clippy::collapsible_if	src/ui/settings/native_tests.rs	fn table_action
+1	clippy::collapsible_match	src/common/config/types.rs	fn field
+1	clippy::derivable_impls	crates/rift-protocol/src/layout.rs	impl Default for Orientation
+1	clippy::doc_lazy_continuation	src/bin/rift-cli.rs	enum WindowCommands
+1	clippy::doc_lazy_continuation	src/common/config/types.rs	pub struct ScrollingLayoutSettings
+2	clippy::explicit_auto_deref	src/actor/wm_controller.rs	fn exec_cmd
+1	clippy::explicit_auto_deref	src/sys/axuielement.rs	pub fn element_at_position
+1	clippy::explicit_auto_deref	src/ui/menu_bar.rs	pub fn new
+1	clippy::field_reassign_with_default	src/actor/reactor/testing.rs	pub fn test_context_with_workspace_count
+1	clippy::field_reassign_with_default	src/actor/reactor/testing.rs	pub fn test_reactor_with_workspace_count
+1	clippy::field_reassign_with_default	src/actor/reactor/tests.rs	fn overview_selects_exact_display_workspace_without_back_and_forth
+1	clippy::field_reassign_with_default	src/actor/spaces.rs	fn runtime
+1	clippy::field_reassign_with_default	src/actor/spaces.rs	pub fn new_for_tests
+1	clippy::field_reassign_with_default	src/common/config/tests.rs	fn workspace_resize_cleans_removed_assignments_and_preserves_valid_rules
+1	clippy::field_reassign_with_default	src/layout_engine/engine.rs	fn simultaneous_suspensions_keep_workspace_owners_through_inactive_returns_and_mode_changes
+1	clippy::field_reassign_with_default	src/model/virtual_workspace.rs	fn default_workspace_setting_applied
+1	clippy::field_reassign_with_default	src/model/virtual_workspace.rs	fn does_not_preserve_workspace_ordinal_when_target_space_already_has_assignments
+1	clippy::field_reassign_with_default	src/model/virtual_workspace.rs	fn generic_assignment_does_not_infer_space_id_churn_from_empty_target
+1	clippy::field_reassign_with_default	src/model/virtual_workspace.rs	fn topology_reassignment_preserves_workspace_ordinal_with_destination_assignments
+1	clippy::field_reassign_with_default	src/model/virtual_workspace.rs	fn unmanaged_rule_does_not_reassign_window_during_transient_space_id_churn
+1	clippy::field_reassign_with_default	src/sys/process.rs	pub fn for_pid
+1	clippy::filter_map_bool_then	src/sys/window_server.rs	pub fn window_spaces
+1	clippy::from_over_into	src/sys/screen.rs	impl Into<u64> for SpaceId
+1	clippy::get_first	src/model/virtual_workspace.rs	fn app_rules
+1	clippy::identity_op	src/sys/axuielement.rs	const MAGIC: u32
+1	clippy::io_other_error	src/sys/service.rs	fn find_rift_executable
+3	clippy::io_other_error	src/sys/service.rs	fn plist_contents
+1	clippy::io_other_error	src/sys/service.rs	fn plist_path
+1	clippy::io_other_error	src/sys/service.rs	fn run_launchctl
+1	clippy::io_other_error	src/sys/service.rs	pub fn service_restart
+2	clippy::io_other_error	src/sys/service.rs	pub fn service_stop
+1	clippy::io_other_error	src/sys/service.rs	pub fn service_uninstall
+1	clippy::items_after_test_module	src/actor/input.rs	mod tests
+1	clippy::items_after_test_module	src/common/config/parse.rs	mod tests
+1	clippy::items_after_test_module	src/model/reactor.rs	mod tests
+1	clippy::items_after_test_module	src/sys/app.rs	mod native_identity_tests
+1	clippy::items_after_test_module	src/sys/window_server.rs	mod tests
+1	clippy::items_after_test_module	src/ui/menu_bar.rs	mod layout_library_tests
+1	clippy::iter_cloned_collect	src/actor/window_notify.rs	pub fn new
+1	clippy::large_enum_variant	src/actor/input.rs	pub enum Request
+1	clippy::large_enum_variant	src/actor/reactor.rs	pub enum Event
+1	clippy::large_enum_variant	src/actor/reactor/animation.rs	enum Motion
+1	clippy::large_enum_variant	src/actor/stack_line.rs	pub enum Event
+1	clippy::large_enum_variant	src/actor/wm_controller.rs	pub enum WmEvent
+1	clippy::large_enum_variant	src/layout_engine/engine.rs	enum WindowRelocation
+1	clippy::large_enum_variant	src/model/reactor.rs	pub enum ReactorError
+1	clippy::len_zero	src/actor/reactor/managers.rs	fn apply_layout
+1	clippy::let_and_return	src/actor/reactor.rs	pub fn new
+1	clippy::let_and_return	src/actor/reactor/testing.rs	pub fn insert_test_window_state
+1	clippy::let_and_return	src/actor/reactor/testing.rs	pub fn make_window
+1	clippy::let_and_return	src/layout_engine/systems/master_stack/system.rs	fn edit_layout
+1	clippy::let_and_return	src/layout_engine/systems/master_stack/system.rs	fn focus
+1	clippy::let_and_return	src/layout_engine/systems/traditional/system.rs	fn edit_layout
+1	clippy::let_and_return	src/layout_engine/systems/traditional/system.rs	fn focus
+1	clippy::let_and_return	src/model/window_store.rs	fn admitted
+1	clippy::let_and_return	src/ui/mission_control.rs	fn native_handoff_ready
+1	clippy::let_unit_value	src/actor/app.rs	pub
+1	clippy::let_unit_value	src/actor/notification_center.rs	fn send_event
+1	clippy::let_unit_value	src/actor/raise_manager.rs	pub fn process_active_sequence
+1	clippy::let_unit_value	src/actor/reactor.rs	fn apply_event_outcome
+1	clippy::let_unit_value	src/actor/reactor.rs	fn broadcast_focused_window_changed
+1	clippy::let_unit_value	src/actor/reactor.rs	fn broadcast_layout_state_changed
+1	clippy::let_unit_value	src/actor/reactor.rs	fn broadcast_window_title_changed
+1	clippy::let_unit_value	src/actor/reactor.rs	fn dispatch_workflow
+1	clippy::let_unit_value	src/actor/reactor.rs	fn finalize_space_change
+1	clippy::let_unit_value	src/actor/reactor.rs	fn handle_admitted
+1	clippy::let_unit_value	src/actor/reactor.rs	fn send_layout_event
+1	clippy::let_unit_value	src/actor/reactor.rs	pub fn warp_mouse
+1	clippy::let_unit_value	src/actor/reactor/managers.rs	fn apply_layout
+7	clippy::let_unit_value	src/actor/wm_controller.rs	pub fn handle_event
+1	clippy::map_entry	src/actor/reactor/tests/fuzz.rs	fn fuzz
+1	clippy::match_ref_pats	crates/rift-core/src/topology.rs	pub fn discovered_space<S: Copy>
+1	clippy::missing_const_for_thread_local	src/actor/reactor/replay.rs	static DESERIALIZE_THREAD_HANDLE: RefCell<Option<AppThreadHandle>>
+1	clippy::missing_safety_doc	src/sys/axuielement.rs	pub unsafe fn from_create_rule
+1	clippy::missing_safety_doc	src/sys/axuielement.rs	pub unsafe fn from_get_rule
+1	clippy::missing_safety_doc	src/sys/event_tap.rs	pub unsafe fn new
+1	clippy::missing_safety_doc	src/sys/space_switch.rs	pub unsafe fn switch_space
+1	clippy::missing_safety_doc	src/sys/window_server.rs	pub unsafe fn switch_space
+2	clippy::needless_borrow	src/actor/app.rs	static MUTEX: LazyLock<parking_lot::Mutex<
+3	clippy::needless_borrow	src/common/config/tests.rs	fn binding_mode_config_rejects_bad_targets_reserved_default_and_bad_hotkeys
+1	clippy::needless_borrow	src/layout_engine/engine.rs	fn apply_focus_response
+1	clippy::needless_borrow	src/layout_engine/engine.rs	fn handle_event_inner
+6	clippy::needless_borrow	src/layout_engine/engine.rs	pub
+1	clippy::needless_borrow	src/layout_engine/engine/persistence/restore.rs	pub
+1	clippy::needless_borrow	src/model/virtual_workspace.rs	pub
+1	clippy::needless_lifetimes	src/sys/window_server.rs	pub fn advance<'a>
+2	clippy::needless_return	src/layout_engine/engine.rs	pub
+1	clippy::needless_return	src/sys/screen.rs	pub fn set_active_menu_bar_display_uuid
+1	clippy::needless_return	src/sys/window_server.rs	pub
+1	clippy::needless_update	src/model/virtual_workspace.rs	fn shared_catalog_resolution_retains_dormant_positions_and_unique_names
+1	clippy::needless_update	src/sys/gesture.rs	fn undecided_native_begin_has_bounded_hold
+1	clippy::new_ret_no_self	src/sys/observer.rs	pub fn new<F: Fn
+1	clippy::new_without_default	src/ipc/cli_exec.rs	pub fn new
+1	clippy::new_without_default	src/ipc/subscriptions.rs	pub fn new
+1	clippy::nonminimal_bool	src/actor/reactor.rs	fn plan_workspace_placements
+1	clippy::nonminimal_bool	src/actor/reactor.rs	fn request_window_inventories
+1	clippy::nonminimal_bool	src/ui/mission_control.rs	pub
+2	clippy::obfuscated_if_else	src/ui/menu_bar.rs	fn from_inputs
+1	clippy::ptr_arg	src/actor/reactor/managers.rs	fn bound_scrolling_tiled_frames_to_screen
+1	clippy::question_mark	src/model/window_store.rs	pub fn remove_window
+3	clippy::question_mark	src/ui/mission_control.rs	fn drop_target
+1	clippy::redundant_closure	src/bin/rift.rs	fn main
+1	clippy::redundant_field_names	src/actor/reactor/animation.rs	fn completed_camera_keeps_its_offset_after_native_window_clamping
+1	clippy::redundant_field_names	src/layout_engine/systems/scrolling.rs	fn drop
+1	clippy::redundant_pattern_matching	src/sys/window_server.rs	pub fn window_ordered_in
+1	clippy::result_large_err	src/actor/reactor.rs	pub
+1	clippy::result_large_err	src/actor/reactor.rs	pub fn try_send
+1	clippy::result_large_err	src/actor/reactor/events/system.rs	pub fn handle_menu_closed
+1	clippy::result_large_err	src/actor/reactor/events/system.rs	pub fn handle_menu_opened
+1	clippy::result_large_err	src/actor/reactor/events/system.rs	pub fn handle_raise_completed
+1	clippy::result_large_err	src/actor/reactor/events/system.rs	pub fn handle_raise_timeout
+1	clippy::result_large_err	src/actor/reactor/events/system.rs	pub fn handle_register_wm_sender
+1	clippy::result_large_err	src/actor/reactor/events/system.rs	pub fn handle_system_woke
+1	clippy::result_large_err	src/actor/reactor/managers.rs	fn apply_layout
+1	clippy::result_large_err	src/actor/reactor/managers.rs	pub fn update_layout
+1	clippy::result_large_err	src/actor/reactor/managers.rs	pub fn update_layout_instant
+1	clippy::result_unit_err	src/sys/screen.rs	fn get_number
+1	clippy::should_implement_trait	src/common/config/parse.rs	pub fn default
+1	clippy::should_implement_trait	src/sys/timer.rs	pub fn next
+1	clippy::to_string_trait_impl	src/sys/screen.rs	impl ToString for SpaceId
+1	clippy::too_many_arguments	crates/rift-core/src/workspaces.rs	pub fn step<K: Copy + PartialEq, S: Copy + PartialEq>
+1	clippy::too_many_arguments	src/actor/drag.rs	fn hit_test_available
+1	clippy::too_many_arguments	src/actor/mission_control.rs	pub fn new
+1	clippy::too_many_arguments	src/actor/reactor.rs	pub fn spawn
+3	clippy::too_many_arguments	src/layout_engine/engine.rs	pub
+1	clippy::too_many_arguments	src/layout_engine/systems.rs	fn calculate_layout
+2	clippy::too_many_arguments	src/layout_engine/systems.rs	pub
+1	clippy::too_many_arguments	src/layout_engine/systems/scrolling.rs	fn build
+1	clippy::too_many_arguments	src/layout_engine/systems/scrolling.rs	pub
+1	clippy::too_many_arguments	src/model/virtual_workspace.rs	fn assign
+1	clippy::too_many_arguments	src/model/virtual_workspace.rs	fn assign_window_with_app_info
+1	clippy::too_many_arguments	src/sys/event_tap.rs	pub unsafe fn new
+1	clippy::too_many_arguments	src/ui/settings/commands.rs	fn recorder
+1	clippy::type_complexity	crates/rift-core/src/plain/wire.rs	pub fn decode_trace
+1	clippy::type_complexity	crates/rift-core/src/reconciler.rs	pub fn animation_ended
+1	clippy::type_complexity	src/actor/app.rs	struct State
+1	clippy::type_complexity	src/actor/reactor.rs	fn plan_workspace_placements
+1	clippy::type_complexity	src/actor/reactor/query.rs	pub
+1	clippy::type_complexity	src/common/config/schema.rs	pub struct ConfigField<T>
+1	clippy::type_complexity	src/layout_engine/engine/persistence/tests.rs	fn topology_of
+1	clippy::type_complexity	src/layout_engine/systems/scrolling.rs	fn shown
+1	clippy::type_complexity	src/layout_engine/systems/scrolling.rs	pub
+1	clippy::type_complexity	src/model/virtual_workspace.rs	fn initial_distribution_is_contiguous_balanced_and_pins_win
+1	clippy::type_complexity	src/model/virtual_workspace.rs	fn topology_of
+1	clippy::type_complexity	src/sys/window_notify.rs	static EVENT_CHANNEL: Lazy<
+1	clippy::type_complexity	src/ui/settings/mod.rs	struct Env
+1	clippy::unnecessary_cast	src/sys/dispatch.rs	fn dispatch_source_type_proc
+1	clippy::unnecessary_cast	src/sys/mach.rs	pub unsafe fn send_mach_reply
+1	clippy::unnecessary_cast	src/sys/window_server.rs	fn window_info_from_query
+2	clippy::unnecessary_lazy_evaluations	src/sys/app.rs	pub
+2	clippy::unnecessary_map_or	src/actor/app.rs	fn should_ignore_window_info
+1	clippy::unnecessary_map_or	src/actor/reactor.rs	fn interval_gap
+1	clippy::unnecessary_map_or	src/actor/window_notify.rs	pub fn is_ignored
+1	clippy::unnecessary_map_or	src/common/config/types.rs	fn field
+2	clippy::unnecessary_mut_passed	src/actor/reactor.rs	fn dispatch_workflow
+4	clippy::unnecessary_operation	src/actor/reactor/animation.rs	fn completed_camera_keeps_its_offset_after_native_window_clamping
+1	clippy::unnecessary_operation	src/actor/reactor/gesture.rs	fn setup_options_threshold
+1	clippy::unnecessary_operation	src/layout_engine/engine.rs	fn handle_event_inner
+2	clippy::unnecessary_operation	src/layout_engine/engine.rs	fn move_node_crosses_display_edge_and_enters_at_near_edge
+1	clippy::unnecessary_operation	src/layout_engine/engine.rs	fn restore_native_layout
+1	clippy::unnecessary_operation	src/layout_engine/engine.rs	pub
+1	clippy::unnecessary_operation	src/layout_engine/engine/persistence/tests.rs	fn scrolling_checkpoint_preserves_selection_and_viewport_through_readmission
+2	clippy::unnecessary_operation	src/layout_engine/systems.rs	fn common_insertion_point_controls_tree_and_linear_layouts
+3	clippy::unnecessary_operation	src/layout_engine/systems.rs	fn normalized_container_trees_expose_layout_topology
+2	clippy::unnecessary_operation	src/layout_engine/systems.rs	fn suspended_members_preserve_slots_and_geometry_in_every_backend
+1	clippy::unnecessary_operation	src/layout_engine/systems/bsp.rs	fn clone_preserves_arrangement_and_selection
+2	clippy::unnecessary_operation	src/layout_engine/systems/floating.rs	fn explicit_stacks_share_geometry_and_restore_only_their_members
+1	clippy::unnecessary_operation	src/layout_engine/systems/floating.rs	fn fixture
+2	clippy::unnecessary_operation	src/layout_engine/systems/floating.rs	fn saved_stack_frames_survive_identity_changes_and_layout_clones
+1	clippy::unnecessary_operation	src/layout_engine/systems/master_stack.rs	fn master_count_moves_a_complete_nested_group_without_flattening_it
+1	clippy::unnecessary_operation	src/layout_engine/systems/master_stack.rs	fn region_identity_and_grouping_survive_removal_and_settings_reload
+1	clippy::unnecessary_operation	src/layout_engine/systems/stack.rs	struct Legacy<'a>
+1	clippy::unwrap_or_default	src/ipc/subscriptions.rs	pub fn subscribe_cli
+1	clippy::useless_asref	src/actor/reactor.rs	fn handle_authoritative_space_snapshot
+1	clippy::useless_conversion	src/actor/reactor/testing.rs	pub fn make_screen_snapshots
+1	clippy::while_let_loop	src/bin/rift.rs	fn main
+1	clippy::while_let_loop	src/model/virtual_workspace.rs	fn balance_owners
+1	clippy::write_with_newline	src/actor/reactor/replay.rs	pub
+1	clippy::zombie_processes	src/bin/rift.rs	fn main
+1	dead_code	src/layout_engine/systems/scrolling/roc_columns.rs	fn focus_words
+1	dead_code	src/layout_engine/systems/scrolling/roc_columns.rs	fn focused_ids
+1	dead_code	src/layout_engine/systems/scrolling/roc_columns.rs	fn focused_words
+2	dead_code	src/layout_engine/systems/scrolling/roc_columns.rs	pub
+1	unused_mut	src/layout_engine/systems.rs	fn measure_layout_shadow
+1	unused_variables	src/actor/reactor/tests.rs	fn other_window_moves_during_a_modifier_drag
+1	unused_variables	src/actor/reactor/tests/fuzz.rs	fn report_frame

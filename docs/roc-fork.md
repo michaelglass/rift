@@ -879,6 +879,22 @@ layouts are parsed at the boundary.**
   across a new layout. Plants 4/4: members from the active layout only; obsolete trees kept; a
   laid-out workspace forgetting its size on a replace; a saved layout's validation skipped.
 
+**The clippy gate (2026-11-28, the lead's ruling).** `check.sh`'s clippy count depended on the
+cache: clippy re-emits warnings only for crates it re-lints (one run printed 4). Now:
+- **Every full check re-lints the workspace's own crates**: clippy gets a new
+  `--cfg clippy_gate="<nonce>"` (declared with `--check-cfg`) each run. Clippy's arguments are in
+  the fingerprint of the workspace's crates only, so exactly they re-lint; dependencies, build
+  scripts and the test builds stay cached (touching the sources instead invalidated the test
+  builds too and took the full check from about 200 s to 431 s). The re-lint costs 28.8 s
+  steady (the cached run took 0.2 s), so check-fast, which runs no clippy, stays without it.
+- **`roc/clippy-baseline.txt`** lists the warnings (293 today, 245 keys), each by lint, file
+  and the item it is in (the nearest item declaration above it), with a count: no line
+  numbers, so unrelated edits do not churn it.
+- **`roc/clippy_gate.py check` fails** on a warning not in the baseline, and on one the baseline
+  lists that is gone, naming it: shrink the baseline in the same commit (`shrink`, which never
+  adds one). The list can only go down. Tried both ways: an unused variable added fails the gate;
+  a listed warning that is gone fails it until `shrink` removes it.
+
 - Next: E3c-1b (the snapshot as core values: the layout's core value, active layout, size,
   camera).
 
