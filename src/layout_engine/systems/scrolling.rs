@@ -1,12 +1,13 @@
 //! A strip of persistent columns in world coordinates, translated by one camera.
 //! View targets follow niri's fit/center and gesture snap semantics. Ordinary layout
 //! animation remains in the reactor; touchpad release belongs to the camera.
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use parking_lot::Mutex;
+use rift_core::camera as cam;
 use serde::{Deserialize, Serialize};
 
 use super::{EditResult, Focus, FocusResult, GroupEdit, LayoutEdit, WindowChange, WindowQuery};
@@ -82,293 +83,80 @@ impl Column {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+/// A remembered view in its saved form (the camera's [`cam::Bookmark`]).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug)]
 struct ViewBookmark {
     column: ColumnId,
     // Relative to the bookmarked column so edits to preceding columns reconcile naturally.
     relative_offset: f64,
 }
 
-/// How a viewport that is not being dragged comes to rest. `Centred` is the view
-/// `center_selected_column` asks for: it may lie past the strip bounds on purpose, so an edit
-/// re-centres it on the selected column instead of clamping it (upstream #718).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Rest {
-    At,
-    Centred,
-}
-
-#[derive(Deserialize, Clone, Debug, Default)]
-#[serde(from = "f64")]
-enum Viewport {
-    #[default]
-    Uninitialized,
-    Gesture(f64),
-    Resting(Rest, Motion),
-}
-
-/// How a resting viewport gets to where it rests.
-#[derive(Clone, Debug)]
-enum Motion {
-    Static(f64),
-    // Keep the previous position until the presenter starts the new target.
-    Pending { from: f64, target: f64 },
-    Animation(CameraSpring),
-}
-
-impl Motion {
-    fn towards(from: f64, target: f64) -> Self {
-        if from == target {
-            Self::Static(target)
-        } else {
-            Self::Pending { from, target }
-        }
-    }
-
-    fn offset(&self) -> f64 {
-        match self {
-            Self::Static(offset) => *offset,
-            Self::Pending { target, .. } => *target,
-            Self::Animation(spring) => spring.current,
-        }
-    }
-
-    fn start_offset(&self) -> f64 {
-        match self {
-            Self::Pending { from, .. } => *from,
-            _ => self.offset(),
-        }
-    }
-
-    fn target(&self) -> f64 {
-        match self {
-            Self::Animation(spring) => spring.target,
-            _ => self.offset(),
-        }
-    }
-
-    fn sample(&mut self, now: Instant, scale: f64) -> Option<bool> {
-        match self {
-            Self::Static(_) => None,
-            Self::Pending { target, .. } => {
-                *self = Self::Static(*target);
-                Some(false)
-            }
-            // Bounds constrain the destination. After a column closes, the previous position
-            // can lie outside them and must remain visible while returning.
-            Self::Animation(spring) => {
-                if spring.sample(now, scale) {
-                    *self = Self::Static(spring.target);
-                    Some(false)
-                } else {
-                    Some(true)
-                }
-            }
-        }
-    }
-
-    /// Move where the motion comes to rest, whether it is at rest or still on its way.
-    fn move_target(&mut self, target: f64, now: Instant) {
-        match self {
-            Self::Static(_) | Self::Pending { .. } => {
-                if target != self.target() {
-                    *self = Self::towards(self.start_offset(), target);
-                }
-            }
-            Self::Animation(spring) => {
-                if target != spring.target {
-                    let now = now.max(spring.sampled);
-                    let (_, velocity) = spring.position_velocity(now);
-                    *spring = CameraSpring::new(spring.current, target, velocity, now);
-                }
-            }
-        }
-    }
-
-    fn rebase(&mut self, delta: f64) {
-        match self {
-            Self::Static(offset) => *offset += delta,
-            Self::Pending { from, target } => {
-                *from += delta;
-                *target += delta;
-            }
-            Self::Animation(spring) => {
-                spring.from += delta;
-                spring.target += delta;
-                spring.current += delta;
-            }
+impl From<ViewBookmark> for Bookmark {
+    fn from(saved: ViewBookmark) -> Self {
+        Bookmark {
+            column: saved.column,
+            relative_offset: saved.relative_offset,
         }
     }
 }
 
-impl Viewport {
-    /// At rest at `offset`, not centred.
-    fn at(offset: f64) -> Self { Self::Resting(Rest::At, Motion::Static(offset)) }
-
-    /// On a spring from `from` to `target`, coming to rest as `rest` says.
-    fn springing(rest: Rest, from: f64, target: f64, velocity: f64, started: Instant) -> Self {
-        Self::Resting(
-            rest,
-            Motion::Animation(CameraSpring::new(from, target, velocity, started)),
-        )
-    }
-
-    // Layout queries use the requested offset; the presenter also needs the previous offset
-    // until it starts the animation.
-    fn offset(&self) -> f64 {
-        match self {
-            Self::Uninitialized => 0.0,
-            Self::Gesture(offset) => *offset,
-            Self::Resting(_, motion) => motion.offset(),
-        }
-    }
-
-    fn start_offset(&self) -> f64 {
-        match self {
-            Self::Resting(_, motion) => motion.start_offset(),
-            Self::Uninitialized | Self::Gesture(_) => self.offset(),
-        }
-    }
-
-    fn target(&self) -> f64 {
-        match self {
-            Self::Resting(_, motion) => motion.target(),
-            Self::Uninitialized | Self::Gesture(_) => self.offset(),
-        }
-    }
-
-    /// Being dragged or on a spring: the offset is a moment, not where it rests.
-    fn moving(&self) -> bool {
-        matches!(self, Self::Gesture(_) | Self::Resting(_, Motion::Animation(_)))
-    }
-
-    fn uncentre(&mut self) {
-        if let Self::Resting(rest, _) = self {
-            *rest = Rest::At;
-        }
-    }
-
-    fn finish(&mut self) {
-        if let Self::Resting(_, motion) = self {
-            *motion = Motion::Static(motion.target());
-        }
-    }
-
-    /// Rest at `target`, no longer centred.
-    fn set_target(&mut self, target: f64) { self.aim(target, Rest::At); }
-
-    fn aim(&mut self, target: f64, rest: Rest) {
-        *self = Self::Resting(rest, Motion::towards(self.start_offset(), target));
-    }
-
-    fn sample(&mut self, now: Instant, scale: f64) -> Option<bool> {
-        match self {
-            Self::Resting(_, motion) => motion.sample(now, scale),
-            Self::Uninitialized | Self::Gesture(_) => None,
-        }
-    }
-
-    fn rebase(&mut self, delta: f64) {
-        match self {
-            Self::Uninitialized => {}
-            Self::Gesture(offset) => *offset += delta,
-            Self::Resting(_, motion) => motion.rebase(delta),
-        }
-    }
-
-    /// The presenter's camera taken back, `ended` when nothing presents it any more. The
-    /// layout owns where the camera rests; the presenter only moves it there. So its position is
-    /// taken only out of a gesture, or out of a resting viewport on its way to the very target
-    /// the presenter shows. A viewport the layout has aimed elsewhere since (a reveal, a settle
-    /// into bounds after an edit) keeps its own target: a presented position can never
-    /// overwrite one the layout set.
-    fn presented(self, presented: &Presented, ended: Ended) -> Self {
-        match (self, presented) {
-            (Self::Gesture(_), Presented::Gesture(offset)) => Self::Gesture(*offset),
-            // A released gesture rests where the presenter has it.
-            (Self::Gesture(_), Presented::Still(offset)) => Self::at(*offset),
-            (Self::Gesture(_), Presented::Moving(spring)) => match ended {
-                Ended::No => Self::Resting(Rest::At, Motion::Animation(spring.clone())),
-                Ended::Yes => Self::at(spring.target),
-            },
-            (Self::Resting(rest, motion), Presented::Still(offset))
-                if motion.target() == *offset =>
-            {
-                Self::Resting(rest, Motion::Static(*offset))
-            }
-            (Self::Resting(rest, motion), Presented::Moving(spring))
-                if motion.target() == spring.target =>
-            {
-                match ended {
-                    Ended::No => Self::Resting(rest, Motion::Animation(spring.clone())),
-                    Ended::Yes => Self::Resting(rest, Motion::Static(spring.target)),
-                }
-            }
-            (viewport, _) => viewport,
+impl From<Bookmark> for ViewBookmark {
+    fn from(bookmark: Bookmark) -> Self {
+        ViewBookmark {
+            column: bookmark.column,
+            relative_offset: bookmark.relative_offset,
         }
     }
 }
 
-/// Whether a presented camera is still presented (`No`) or has ended (`Yes`): an ended one
-/// leaves its viewport at the target, nothing advancing it any more.
-#[derive(Clone, Copy, Debug)]
-enum Ended {
-    No,
-    Yes,
+type Bookmark = cam::Bookmark<ColumnId>;
+type Camera = cam::Camera<ColumnId, WindowId>;
+type CameraEvent = cam::CameraEvent<ColumnId, WindowId>;
+type Facts = cam::Facts<ColumnId, WindowId>;
+type Spans = cam::Spans<ColumnId>;
+
+/// `now` as the camera's [`cam::Time`]: nanoseconds since this process first asked.
+pub(crate) fn camera_time(now: Instant) -> cam::Time {
+    static EPOCH: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    let epoch = *EPOCH.get_or_init(Instant::now);
+    cam::Time(u64::try_from(now.saturating_duration_since(epoch).as_nanos()).unwrap_or(u64::MAX))
 }
 
-/// Niri's default horizontal-view-movement: mass 1, critical damping, stiffness 800.
-#[derive(Clone, Debug)]
-pub(crate) struct CameraSpring {
-    from: f64,
-    target: f64,
-    velocity: f64,
-    current: f64,
-    current_velocity: f64,
-    started: Instant,
-    sampled: Instant,
+/// A gesture event's timestamp as the camera's [`cam::Time`] (the gesture's own clock).
+fn gesture_time(timestamp: Duration) -> cam::Time {
+    cam::Time(u64::try_from(timestamp.as_nanos()).unwrap_or(u64::MAX))
 }
-impl CameraSpring {
-    pub(crate) fn new(from: f64, target: f64, velocity: f64, started: Instant) -> Self {
-        Self {
-            from,
-            target,
-            velocity,
-            current: from,
-            current_velocity: velocity,
-            started,
-            sampled: started,
-        }
-    }
 
-    pub(crate) fn current(&self) -> f64 { self.current }
-
-    pub(crate) fn position_velocity(&self, now: Instant) -> (f64, f64) {
-        let t = now.saturating_duration_since(self.started).as_secs_f64();
-        let omega = 800.0_f64.sqrt();
-        let x0 = self.from - self.target;
-        let b = omega * x0 + self.velocity;
-        let envelope = (-omega * t).exp();
-        (
-            self.target + envelope * (x0 + b * t),
-            envelope * (self.velocity - omega * b * t),
-        )
-    }
-
-    pub(crate) fn sample(&mut self, now: Instant, scale: f64) -> bool {
-        let now = now.max(self.sampled);
-        let (position, velocity) = self.position_velocity(now);
-        self.current = position;
-        self.current_velocity = velocity;
-        self.sampled = now;
-        // Check both position and speed so crossing the target cannot finish early.
-        (self.current - self.target).abs() <= 0.25 / scale
-            && velocity.abs() / 800.0_f64.sqrt() <= 0.25 / scale
+/// The camera's settings, from the scrolling settings.
+fn camera_settings(settings: &ScrollingLayoutSettings) -> cam::CameraSettings {
+    cam::CameraSettings {
+        alignment: match settings.alignment {
+            ScrollingAlignment::Left => cam::Alignment::Left,
+            ScrollingAlignment::Center => cam::Alignment::Center,
+            ScrollingAlignment::Right => cam::Alignment::Right,
+        },
+        navigation: match settings.focus_navigation_style {
+            ScrollingFocusNavigationStyle::Niri => cam::Navigation::Niri,
+            ScrollingFocusNavigationStyle::Anchored => cam::Navigation::Anchored,
+        },
     }
 }
 
-impl From<f64> for Viewport {
-    fn from(offset: f64) -> Self { Self::at(if offset.is_finite() { offset } else { 0.0 }) }
+/// An arrangement's facts as the camera reads them.
+fn facts(view: &ArrangementView) -> Facts {
+    cam::Facts {
+        columns: (view.columns.iter())
+            .map(|c| cam::FactColumn {
+                id: c.id,
+                windows: c.windows().copied().collect(),
+            })
+            .collect(),
+        active_column: view.active_column,
+        selected: (view.columns.get(view.active_column))
+            .and_then(|c| c.rows.get(c.active_window))
+            .map(|row| row.window),
+        fullscreen: view.fullscreen.keys().copied().collect(),
+    }
 }
 
 /// Semantic release result; animation, when enabled, belongs to the viewport.
@@ -411,8 +199,8 @@ struct Geometry {
 /// boundaries; sampling does not enter the layout engine.
 #[derive(Debug)]
 pub(crate) struct ViewportPresentation {
-    viewport: Viewport,
-    motion: Arc<Mutex<MotionHistory>>,
+    viewport: cam::Viewport,
+    motion: Arc<Mutex<cam::MotionHistory>>,
     bounds: (f64, f64),
     tiling: CGRect,
     screen: CGRect,
@@ -423,16 +211,8 @@ pub(crate) struct ViewportPresentation {
 /// a camera or copying history on each display refresh.
 #[derive(Clone, Debug)]
 pub(crate) struct PresentedViewport {
-    camera: Presented,
-    motion: Arc<Mutex<MotionHistory>>,
-}
-
-/// Where the presenter has the camera. How it comes to rest stays the layout's.
-#[derive(Clone, Debug)]
-enum Presented {
-    Gesture(f64),
-    Still(f64),
-    Moving(CameraSpring),
+    camera: cam::Presented,
+    motion: Arc<Mutex<cam::MotionHistory>>,
 }
 
 // Read by the presenter's handoff tests.
@@ -440,26 +220,31 @@ enum Presented {
 impl PresentedViewport {
     pub fn offset(&self) -> f64 {
         match &self.camera {
-            Presented::Gesture(offset) | Presented::Still(offset) => *offset,
-            Presented::Moving(spring) => spring.current,
+            cam::Presented::Gesture(offset) | cam::Presented::Still(offset) => *offset,
+            cam::Presented::Moving(spring) => spring.current,
         }
     }
 
     pub fn velocity(&self) -> f64 {
         match &self.camera {
-            Presented::Moving(spring) => spring.current_velocity,
-            Presented::Gesture(_) | Presented::Still(_) => 0.0,
+            cam::Presented::Moving(spring) => spring.current_velocity,
+            cam::Presented::Gesture(_) | cam::Presented::Still(_) => 0.0,
         }
     }
 }
 
+/// The presenter's own copy of a camera: it advances it frame by frame on the camera's types,
+/// its clock converted at this edge, and hands its progress back as an event.
 impl ViewportPresentation {
     pub fn offset(&self) -> f64 { self.viewport.start_offset() }
 
-    pub fn gesturing(&self) -> bool { matches!(self.viewport, Viewport::Gesture(_)) }
+    pub fn gesturing(&self) -> bool { matches!(self.viewport, cam::Viewport::Gesture(_)) }
 
     pub fn animated(&self) -> bool {
-        matches!(self.viewport, Viewport::Resting(_, Motion::Animation(_)))
+        matches!(
+            self.viewport,
+            cam::Viewport::Resting(_, cam::Motion::Animation(_))
+        )
     }
 
     pub fn finish(&mut self) { self.viewport.finish(); }
@@ -467,42 +252,52 @@ impl ViewportPresentation {
     pub fn target(&self) -> f64 { self.viewport.target() }
 
     pub fn retarget(&mut self, from: f64, velocity: f64, now: Instant) {
-        if let Viewport::Resting(_, motion) = &mut self.viewport {
-            *motion = Motion::Animation(CameraSpring::new(from, motion.target(), velocity, now));
+        if let cam::Viewport::Resting(_, motion) = &mut self.viewport {
+            *motion = cam::Motion::Animation(cam::Spring::new(
+                from,
+                motion.target(),
+                velocity,
+                camera_time(now),
+            ));
         }
     }
 
     pub fn position_velocity(&self, now: Instant) -> (f64, f64) {
         match &self.viewport {
-            Viewport::Resting(_, Motion::Animation(s)) => s.position_velocity(s.sampled.max(now)),
+            cam::Viewport::Resting(_, cam::Motion::Animation(s)) => {
+                s.position_velocity(s.sampled.max(camera_time(now)))
+            }
             _ => (self.offset(), 0.0),
         }
     }
 
     pub fn update(&mut self, delta: f64, time: Duration) {
-        if let Viewport::Gesture(offset) = &mut self.viewport {
-            self.motion
-                .lock()
-                .update(offset, self.bounds, delta * self.tiling.size.width, time);
+        if let cam::Viewport::Gesture(offset) = &mut self.viewport {
+            self.motion.lock().update(
+                offset,
+                self.bounds,
+                delta * self.tiling.size.width,
+                gesture_time(time),
+            );
         }
     }
 
     pub fn sample(&mut self, now: Instant, scale: f64) -> bool {
-        self.viewport.sample(now, scale).unwrap_or(self.gesturing())
+        self.viewport.sample(camera_time(now), scale).unwrap_or(self.gesturing())
     }
 
     /// A pending move counts as started: the presenter reports it as moving.
     pub fn snapshot(&self, now: Instant) -> PresentedViewport {
         let (offset, target) = (self.offset(), self.target());
         let camera = match &self.viewport {
-            Viewport::Gesture(_) => Presented::Gesture(offset),
-            _ if offset == target => Presented::Still(offset),
+            cam::Viewport::Gesture(_) => cam::Presented::Gesture(offset),
+            _ if offset == target => cam::Presented::Still(offset),
             viewport => {
                 let velocity = match viewport {
-                    Viewport::Resting(_, Motion::Animation(s)) => s.current_velocity,
+                    cam::Viewport::Resting(_, cam::Motion::Animation(s)) => s.current_velocity,
                     _ => 0.0,
                 };
-                Presented::Moving(CameraSpring::new(offset, target, velocity, now))
+                cam::Presented::Moving(cam::Spring::new(offset, target, velocity, camera_time(now)))
             }
         };
         PresentedViewport {
@@ -563,16 +358,6 @@ fn clamp_ratio(ratio: f64, settings: &ScrollingLayoutSettings) -> f64 {
     } else {
         min
     }
-}
-
-// Adapted from niri's compute_new_view_offset, using an absolute camera.
-// Rift's outer gaps already reserve padding, including at both strip boundaries.
-fn fit_offset(current: f64, view: f64, column: ColumnGeometry) -> f64 {
-    let left = column.world_x;
-    if column.width >= view {
-        return left;
-    }
-    current.clamp(left + column.width - view, left)
 }
 
 fn centered_offset(view: f64, column: ColumnGeometry) -> f64 {
@@ -759,8 +544,25 @@ impl Geometry {
         self.columns.iter().find(|c| c.id == id).copied()
     }
 
-    fn anchor_offset(&self, index: usize, alignment: ScrollingAlignment) -> f64 {
-        anchor_offset(&self.columns, index, self.tiling.size.width, alignment)
+    /// The strip as the camera reads it.
+    fn spans(&self) -> Spans {
+        cam::Spans {
+            columns: (self.columns.iter())
+                .map(|c| cam::Span {
+                    id: c.id,
+                    world_x: c.world_x,
+                    width: c.width,
+                })
+                .collect(),
+            bounds: self.bounds,
+            view: self.tiling.size.width,
+            snaps: (self.snaps.iter())
+                .map(|snap| cam::Snap {
+                    offset: snap.offset,
+                    column: snap.column,
+                })
+                .collect(),
+        }
     }
 }
 
@@ -947,74 +749,6 @@ fn anchor_offset(
     }
 }
 
-/// Recent camera deltas in pixels, independent of viewport rebasing.
-#[derive(Clone, Debug, Default)]
-struct MotionHistory {
-    samples: VecDeque<(Duration, f64)>,
-    overscroll: f64,
-}
-impl MotionHistory {
-    fn push(&mut self, delta: f64, time: Duration) -> bool {
-        if self.samples.back().is_some_and(|(last, _)| time < *last) {
-            return false;
-        }
-        // macOS reports stationary contacts continuously; retain one fresh idle
-        // anchor so that a pause before a new flick does not dilute that flick.
-        if delta == 0.0
-            && let Some((last, 0.0)) = self.samples.back_mut()
-        {
-            *last = time;
-        } else {
-            if self.samples.len() == 64 {
-                self.samples.pop_front();
-            }
-            self.samples.push_back((time, delta));
-        }
-        while self
-            .samples
-            .front()
-            .is_some_and(|(first, _)| time.saturating_sub(*first) > Duration::from_millis(150))
-        {
-            self.samples.pop_front();
-        }
-        true
-    }
-
-    fn update(
-        &mut self,
-        offset: &mut f64,
-        bounds: (f64, f64),
-        delta: f64,
-        time: Duration,
-    ) -> Option<f64> {
-        if !delta.is_finite() {
-            return None;
-        }
-        let raw = *offset + self.overscroll + delta;
-        let bounded = raw.clamp(bounds.0, bounds.1);
-        let moved = bounded - *offset;
-        if !self.push(moved, time) {
-            return None;
-        }
-        self.overscroll = raw - bounded;
-        *offset = bounded;
-        Some(moved)
-    }
-
-    fn velocity(&self) -> f64 {
-        let (Some(&(first, _)), Some(&(last, _))) = (self.samples.front(), self.samples.back())
-        else {
-            return 0.0;
-        };
-        let dt = last.saturating_sub(first).as_secs_f64();
-        if dt > 0.0 {
-            self.samples.iter().map(|(_, delta)| delta).sum::<f64>() / dt
-        } else {
-            0.0
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 enum FullscreenMode {
     Screen,
@@ -1032,47 +766,9 @@ struct ArrangementView {
     fullscreen: HashMap<WindowId, FullscreenMode>,
 }
 
-/// The view the camera owes a fullscreen window: none (`Strip`), or the strip's view to go back
-/// to once `window` is no longer fullscreen. Not a second fullscreen fact: whether `window` is
-/// fullscreen is the core's (its rows' fills). This changes only on the core's answers (the
-/// fullscreen toggle's outcome, a removal or replacement naming `window`) and is reconciled
-/// against the core at the settle point.
-#[derive(Clone, Debug, Default)]
-enum Showing {
-    #[default]
-    Strip,
-    Fullscreen {
-        window: WindowId,
-        return_to: ViewBookmark,
-    },
-}
-
-impl Showing {
-    /// The return owed to `window`, taken (the camera back to owing nothing); none if it is owed
-    /// to another window, or to none.
-    fn take_owed_to(&mut self, window: WindowId) -> Option<ViewBookmark> {
-        match std::mem::take(self) {
-            Self::Fullscreen { window: owed, return_to } if owed == window => Some(return_to),
-            other => {
-                *self = other;
-                None
-            }
-        }
-    }
-}
-
-#[derive(Clone, Debug, Default)]
-struct Camera {
-    viewport: Viewport,
-    motion: MotionHistory,
-    transient_restore: Option<ViewBookmark>,
-    showing: Showing,
-    restored_view: Option<ViewBookmark>,
-}
-
+/// A layout's prepared geometry (the host's cache, rebuilt from core state; never saved).
 #[derive(Clone, Debug, Default)]
 struct LayoutState {
-    camera: Camera,
     geometry: Option<Geometry>,
 }
 
@@ -1090,35 +786,39 @@ struct BeforeEdit {
 /// A layout as it is saved: its arrangement (the core's, in rift's shape) beside its camera.
 struct SavedLayout<'a> {
     view: ArrangementView,
-    state: &'a LayoutState,
+    geometry: Option<&'a Geometry>,
+    camera: &'a Camera,
 }
 
 impl Serialize for SavedLayout<'_> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
-        let SavedLayout { view, state } = self;
+        let SavedLayout { view, geometry, camera } = self;
         let mut stored = serializer.serialize_struct("LayoutState", 8)?;
         stored.serialize_field("columns", &view.columns)?;
         stored.serialize_field("active_column", &view.active_column)?;
         stored.serialize_field("next_column_id", &view.next_column_id)?;
-        let current = state.camera.viewport.offset();
-        let offset = if state.camera.viewport.moving() {
-            state.clamp_offset(current)
-        } else {
-            current
+        let current = camera.viewport().offset();
+        let offset = match geometry {
+            Some(g) if camera.viewport().moving() => g.clamp(current),
+            _ => current,
         };
         stored.serialize_field("viewport", &offset)?;
-        let anchor = state.bookmark(view).or_else(|| state.camera.restored_view.clone()).map(
-            |mut anchor| {
-                anchor.relative_offset += offset - current;
-                anchor
-            },
-        );
+        let shown = geometry.and_then(|g| camera.bookmark(&g.spans(), &facts(view)));
+        let anchor = shown.or(camera.restored_view()).map(|mut anchor| {
+            anchor.relative_offset += offset - current;
+            ViewBookmark::from(anchor)
+        });
         stored.serialize_field("view_anchor", &anchor)?;
-        stored.serialize_field("transient_restore", &state.camera.transient_restore)?;
-        let owed = match &state.camera.showing {
-            Showing::Strip => None,
-            Showing::Fullscreen { window, return_to } => Some((*window, return_to)),
+        stored.serialize_field(
+            "transient_restore",
+            &camera.transient_restore().map(ViewBookmark::from),
+        )?;
+        let owed = match camera.showing() {
+            cam::Showing::Strip => None,
+            cam::Showing::Fullscreen { window, return_to } => {
+                Some((*window, ViewBookmark::from(*return_to)))
+            }
         };
         stored.serialize_field("fullscreen_return", &owed)?;
         stored.serialize_field("fullscreen_modes", &view.fullscreen)?;
@@ -1135,7 +835,8 @@ struct StoredLayoutState {
     columns: Vec<StoredColumn>,
     active_column: usize,
     next_column_id: u64,
-    viewport: Viewport,
+    /// The saved offset (`Viewport::saved` takes a non-finite one as 0).
+    viewport: f64,
     view_anchor: Option<ViewBookmark>,
     transient_restore: Option<ViewBookmark>,
     fullscreen_return: Option<(WindowId, ViewBookmark)>,
@@ -1167,7 +868,7 @@ struct StoredColumn {
 #[serde(from = "StoredLayoutState")]
 struct LoadedLayout {
     view: ArrangementView,
-    state: LayoutState,
+    camera: Camera,
 }
 
 // The core is seeded from a saved slotmap through its own written form (`of_slotmap`).
@@ -1175,7 +876,8 @@ impl Serialize for LoadedLayout {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         SavedLayout {
             view: self.view.clone(),
-            state: &self.state,
+            geometry: None,
+            camera: &self.camera,
         }
         .serialize(serializer)
     }
@@ -1259,23 +961,25 @@ impl From<StoredLayoutState> for LoadedLayout {
                 next_column_id: next,
                 fullscreen,
             },
-            state: LayoutState {
-                camera: Camera {
-                    viewport: stored.viewport,
-                    transient_restore: stored.transient_restore,
-                    showing: match (stored.fullscreen_return, stored.fullscreen_restore) {
-                        (Some((window, return_to)), _) => Showing::Fullscreen { window, return_to },
-                        (None, Some(return_to)) => match lone_fullscreen {
-                            Some(window) => Showing::Fullscreen { window, return_to },
-                            None => Showing::Strip,
-                        },
-                        (None, None) => Showing::Strip,
+            camera: Camera::saved(
+                stored.viewport,
+                stored.transient_restore.map(Bookmark::from),
+                match (stored.fullscreen_return, stored.fullscreen_restore) {
+                    (Some((window, return_to)), _) => cam::Showing::Fullscreen {
+                        window,
+                        return_to: return_to.into(),
                     },
-                    restored_view: stored.view_anchor,
-                    ..Camera::default()
+                    (None, Some(return_to)) => match lone_fullscreen {
+                        Some(window) => cam::Showing::Fullscreen {
+                            window,
+                            return_to: return_to.into(),
+                        },
+                        None => cam::Showing::Strip,
+                    },
+                    (None, None) => cam::Showing::Strip,
                 },
-                geometry: None,
-            },
+                stored.view_anchor.map(Bookmark::from),
+            ),
         };
         if let Some(window) = stored.selected {
             loaded.view.activate(window);
@@ -1301,284 +1005,109 @@ impl ArrangementView {
     }
 }
 
-impl LayoutState {
-    fn fullscreen_frame(
-        &self,
-        view: &ArrangementView,
-        geometry: &Geometry,
-        window: WindowId,
-    ) -> Option<CGRect> {
-        Some(match view.fullscreen.get(&window)? {
-            FullscreenMode::Screen => geometry.screen,
-            FullscreenMode::WithinGaps => geometry.tiling,
-        })
-    }
+/// `window`'s frame while fullscreen, if the core shows it fullscreen.
+fn fullscreen_frame(
+    view: &ArrangementView,
+    geometry: &Geometry,
+    window: WindowId,
+) -> Option<CGRect> {
+    Some(match view.fullscreen.get(&window)? {
+        FullscreenMode::Screen => geometry.screen,
+        FullscreenMode::WithinGaps => geometry.tiling,
+    })
+}
 
-    /// A return owed to a window that is no longer fullscreen, consumed: restored, unless the
-    /// core's active column still shows a fullscreen window (dropped then); the column it
-    /// shows, for the core to make active.
-    fn consume_return(
-        &mut self,
-        view: &ArrangementView,
-        return_to: ViewBookmark,
-    ) -> Option<ColumnId> {
-        if Self::active_column_fullscreen(view) {
-            return None;
-        }
-        self.restore(view, return_to)
-    }
-
-    /// Whether the core shows a fullscreen window in its active column.
-    fn active_column_fullscreen(view: &ArrangementView) -> bool {
-        view.columns
-            .get(view.active_column)
-            .is_some_and(|column| column.windows().any(|wid| view.fullscreen.contains_key(wid)))
-    }
-
-    /// The return owed reconciled with the core: if the core no longer shows its window
-    /// fullscreen, by whatever path, it is consumed here. From the settle point the camera
-    /// cannot make a column active, so it restores only a return to the active column and
-    /// drops any other.
-    fn reconcile_return(&mut self, view: &ArrangementView) {
-        let Showing::Fullscreen { window, .. } = &self.camera.showing else {
-            return;
-        };
-        if view.fullscreen.contains_key(window) {
-            return;
-        }
-        let window = *window;
-        let Some(return_to) = self.camera.showing.take_owed_to(window) else {
-            return;
-        };
-        let active = view.columns.get(view.active_column).map(|c| c.id);
-        if active == Some(return_to.column) {
-            self.consume_return(view, return_to);
-        }
-    }
-
-    fn prepare_geometry(
-        &mut self,
-        settings: &ScrollingLayoutSettings,
-        inactive: &BTreeSet<WindowId>,
-        screen: CGRect,
-        constraints: &HashMap<WindowId, WindowLayoutConstraints>,
-        revision: Option<u64>,
-        gaps: &GapSettings,
-        shadow: crate::layout_engine::Shadow,
-        view: impl FnOnce(bool) -> ArrangementView,
-    ) {
-        let same_constraints =
-            self.geometry.as_ref().is_some_and(|g| g.has_constraints(constraints, revision));
-        if let Some(g) = self.geometry.as_mut()
-            && g.screen == screen
-            && g.gaps == *gaps
-            && (same_constraints
-                || (!settings.preserve_window_sizes && g.same_projected_constraints(constraints)))
-        {
-            if !same_constraints {
-                // Edits may introduce a member before the next engine projection.
-                g.constraints.clone_from(constraints);
-            }
-            g.constraint_revision = revision;
-            return;
-        }
-        // The arrangement this pass lays out: the core's, after it fixed preserved widths (a
-        // window's locked width fixing its column's, with this pass's constraints).
-        let view = view(settings.preserve_window_sizes);
-        if self.camera.restored_view.is_none() {
-            self.camera.restored_view = self.bookmark(&view);
-        }
-        let initial = matches!(self.camera.viewport, Viewport::Uninitialized);
-        let mut snapshot = self.geometry.take().map(|g| g.constraints).unwrap_or_default();
+/// A layout pass: the geometry prepared (the host's cache, kept when nothing it is built from
+/// changed); for a new one, the event that tells the camera (`Prepared`, its single settle
+/// point). `before` is the geometry the camera last saw, if any.
+#[allow(clippy::too_many_arguments)]
+fn prepare_geometry(
+    geometry: &mut Option<Geometry>,
+    before: Option<Spans>,
+    settings: &ScrollingLayoutSettings,
+    inactive: &BTreeSet<WindowId>,
+    screen: CGRect,
+    constraints: &HashMap<WindowId, WindowLayoutConstraints>,
+    revision: Option<u64>,
+    gaps: &GapSettings,
+    shadow: crate::layout_engine::Shadow,
+    view: impl FnOnce(bool) -> ArrangementView,
+    now: cam::Time,
+) -> Option<CameraEvent> {
+    let same_constraints =
+        geometry.as_ref().is_some_and(|g| g.has_constraints(constraints, revision));
+    if let Some(g) = geometry.as_mut()
+        && g.screen == screen
+        && g.gaps == *gaps
+        && (same_constraints
+            || (!settings.preserve_window_sizes && g.same_projected_constraints(constraints)))
+    {
         if !same_constraints {
-            snapshot.clone_from(constraints);
+            // Edits may introduce a member before the next engine projection.
+            g.constraints.clone_from(constraints);
         }
-        let geometry = Geometry::build(
-            &view,
+        g.constraint_revision = revision;
+        return None;
+    }
+    // The arrangement this pass lays out: the core's, after it fixed preserved widths (a
+    // window's locked width fixing its column's, with this pass's constraints).
+    let view = view(settings.preserve_window_sizes);
+    let mut snapshot = geometry.take().map(|g| g.constraints).unwrap_or_default();
+    if !same_constraints {
+        snapshot.clone_from(constraints);
+    }
+    let built = Geometry::build(
+        &view,
+        settings,
+        inactive,
+        screen,
+        snapshot,
+        revision,
+        gaps.clone(),
+        shadow,
+    );
+    let prepared = CameraEvent::Prepared {
+        before,
+        spans: built.spans(),
+        facts: facts(&view),
+        settings: camera_settings(settings),
+        now,
+    };
+    *geometry = Some(built);
+    Some(prepared)
+}
+
+/// The geometry rebuilt after an edit the core made, from the arrangement after it (`view`),
+/// and the event that tells the camera (`Rebuilt`, settling it), holding `hold` still on screen.
+/// None is built before the layout's first pass.
+fn rebuilt(
+    geometry: &mut Option<Geometry>,
+    view: &ArrangementView,
+    settings: &ScrollingLayoutSettings,
+    inactive: &BTreeSet<WindowId>,
+    hold: Option<cam::HeldAt<ColumnId, WindowId>>,
+) -> CameraEvent {
+    let spans = geometry.take().map(|old| {
+        let built = Geometry::build(
+            view,
             settings,
             inactive,
-            screen,
-            snapshot,
-            revision,
-            gaps.clone(),
-            shadow,
+            old.screen,
+            old.constraints,
+            old.constraint_revision,
+            old.gaps,
+            // An edit's rebuild is not a Space's layout pass.
+            crate::layout_engine::Shadow::outside_a_pass(),
         );
-        self.set_geometry(&view, geometry, None);
-        if initial {
-            // The first view starts at the strip's origin and jumps, unanimated, to where the
-            // selection is shown.
-            self.camera.viewport = Viewport::at(0.0);
-            let g = self.geometry.as_ref().unwrap();
-            if g.columns.len() == 1 {
-                let offset = g.anchor_offset(0, settings.alignment);
-                self.camera.viewport.set_target(offset);
-            } else {
-                self.reveal(&view, settings);
-            }
-            self.camera.viewport.finish();
-        }
-    }
-
-    /// Every geometry change, whether an edit, a screen or gap change or new constraints, goes
-    /// through here, so none can skip settling the viewport (upstream #718).
-    ///
-    /// One bookmarked column keeps its place on screen: the saved view when its column is in
-    /// the new geometry (upstream #663), otherwise `hold`. A saved view whose column is dormant
-    /// (no window in it taking part yet) has no geometry: it waits for readmission, and the
-    /// settle keeps the view in bounds meanwhile; it is forgotten once its column is gone.
-    fn set_geometry(
-        &mut self,
-        view: &ArrangementView,
-        geometry: Geometry,
-        hold: Option<ViewBookmark>,
-    ) {
-        let restored = self.camera.restored_view.take();
-        let (restored, dormant) = match restored {
-            Some(b) if geometry.column(b.column).is_some() => (Some(b), None),
-            Some(b) if view.columns.iter().any(|c| c.id == b.column) => (None, Some(b)),
-            _ => (None, None),
-        };
-        if let Some(bookmark) = restored.or(hold)
-            && let Some(column) = geometry.column(bookmark.column)
-        {
-            let offset = self.camera.viewport.offset();
-            self.camera.viewport.rebase(column.world_x + bookmark.relative_offset - offset);
-        }
-        self.camera.restored_view = dormant;
-        self.geometry = Some(geometry);
-        self.settle_viewport(view);
-    }
-
-    /// After the geometry changes the viewport comes to rest within the strip bounds, or, when
-    /// centred, centred on whichever column is selected now. A gesture keeps its overscroll
-    /// until it ends.
-    fn settle_viewport(&mut self, view: &ArrangementView) {
-        self.reconcile_return(view);
-        let Some(g) = &self.geometry else {
-            return;
-        };
-        let centred = Self::centred_offset(view, g);
-        let Viewport::Resting(rest, motion) = &mut self.camera.viewport else {
-            return;
-        };
-        let clamped = g.clamp(motion.target());
-        let target = match rest {
-            Rest::At => clamped,
-            Rest::Centred => centred.unwrap_or(clamped),
-        };
-        motion.move_target(target, Instant::now());
-    }
-
-    /// `offset` within the strip bounds, once there is a geometry to bound it.
-    fn clamp_offset(&self, offset: f64) -> f64 {
-        self.geometry.as_ref().map_or(offset, |g| g.clamp(offset))
-    }
-
-    /// The selected column's place in `g`; a dormant selected column has none.
-    fn active_column_geometry(view: &ArrangementView, g: &Geometry) -> Option<ColumnGeometry> {
-        g.column(view.columns.get(view.active_column)?.id)
-    }
-
-    fn centred_offset(view: &ArrangementView, g: &Geometry) -> Option<f64> {
-        let column = Self::active_column_geometry(view, g)?;
-        Some(centered_offset(g.tiling.size.width, column))
-    }
-
-    fn bookmark(&self, view: &ArrangementView) -> Option<ViewBookmark> {
-        let column = Self::active_column_geometry(view, self.geometry.as_ref()?)?;
-        Some(ViewBookmark {
-            column: column.id,
-            relative_offset: self.camera.viewport.offset() - column.world_x,
-        })
-    }
-
-    /// The camera aimed back at a remembered view, if the strip still holds its column; that
-    /// column, which the caller has the core make active (the camera never writes the
-    /// arrangement).
-    fn restore(&mut self, view: &ArrangementView, bookmark: ViewBookmark) -> Option<ColumnId> {
-        if !view.columns.iter().any(|c| c.id == bookmark.column) {
-            return None;
-        }
-        if let Some(g) = &self.geometry
-            && let Some(column) = g.column(bookmark.column)
-        {
-            let view = g.tiling.size.width;
-            self.camera.viewport.set_target(fit_offset(
-                column.world_x + bookmark.relative_offset,
-                view,
-                column,
-            ));
-        }
-        Some(bookmark.column)
-    }
-
-    fn reveal(&mut self, view: &ArrangementView, settings: &ScrollingLayoutSettings) {
-        let Some(g) = &self.geometry else {
-            return;
-        };
-        let Some(column) = Self::active_column_geometry(view, g) else {
-            return;
-        };
-        let offset = if settings.focus_navigation_style == ScrollingFocusNavigationStyle::Anchored {
-            g.anchor_offset(
-                g.columns.iter().position(|c| c.id == column.id).unwrap(),
-                settings.alignment,
-            )
-        } else {
-            fit_offset(self.camera.viewport.target(), g.tiling.size.width, column)
-        };
-        // A reveal that leaves the view where it is keeps it centred.
-        if self.camera.viewport.target() != offset {
-            self.camera.viewport.set_target(offset);
-        }
-    }
-
-    /// The camera's half of an edit the core made: the geometry rebuilt from the arrangement
-    /// after it (`view`). With `Hold::Selection` the camera holds the selection (`window`, or
-    /// else the column it was in, `id`, at `old_x`) where it was on screen; with `Hold::Strip`
-    /// it keeps its place on the strip, so a moved column visibly travels.
-    fn rebuilt(
-        &mut self,
-        view: &ArrangementView,
-        settings: &ScrollingLayoutSettings,
-        inactive: &BTreeSet<WindowId>,
-        hold: Hold,
-        before: &BeforeEdit,
-    ) {
-        let offset = self.camera.viewport.offset();
-        if let Some(old) = self.geometry.take() {
-            let geometry = Geometry::build(
-                view,
-                settings,
-                inactive,
-                old.screen,
-                old.constraints,
-                old.constraint_revision,
-                old.gaps,
-                // An edit's rebuild is not a Space's layout pass.
-                crate::layout_engine::Shadow::outside_a_pass(),
-            );
-            let hold = match hold {
-                Hold::Selection => {
-                    let anchor = before
-                        .window
-                        .and_then(|wid| view.locate(wid))
-                        .map(|(col, _)| view.columns[col].id)
-                        .or_else(|| {
-                            before.id.filter(|id| view.columns.iter().any(|c| c.id == *id))
-                        });
-                    anchor.zip(before.old_x).map(|(column, x)| ViewBookmark {
-                        column,
-                        relative_offset: offset - x,
-                    })
-                }
-                Hold::Strip => None,
-            };
-            self.set_geometry(view, geometry, hold);
-        }
-        if view.columns.is_empty() {
-            self.camera.viewport = Viewport::at(0.0);
-        }
+        let spans = built.spans();
+        *geometry = Some(built);
+        spans
+    });
+    CameraEvent::Rebuilt {
+        spans,
+        facts: facts(view),
+        hold,
+        now: camera_time(Instant::now()),
     }
 }
 
@@ -1599,6 +1128,9 @@ enum Hold {
 #[serde(from = "SavedSystem")]
 pub struct ScrollingLayoutSystem {
     layouts: slotmap::SecondaryMap<LayoutId, LayoutState>,
+    /// Every layout's camera (`rift_core::camera`), told of each change with the geometry and
+    /// arrangement it reads.
+    cameras: cam::Cameras<LayoutId, ColumnId, WindowId>,
     pub(super) settings: ScrollingLayoutSettings,
     core: projection::Decider,
 }
@@ -1608,6 +1140,7 @@ impl Default for ScrollingLayoutSystem {
         let settings = ScrollingLayoutSettings::default();
         ScrollingLayoutSystem {
             layouts: slotmap::SecondaryMap::default(),
+            cameras: cam::Cameras::default(),
             core: projection::decider(projection::CoreColumns::new(projection::settings(
                 &settings,
             ))),
@@ -1626,12 +1159,12 @@ struct SavedSystem {
 impl From<SavedSystem> for ScrollingLayoutSystem {
     fn from(saved: SavedSystem) -> Self {
         let core = projection::seed(&saved.layouts);
+        let layouts: Vec<_> = saved.layouts.into_iter().collect();
         ScrollingLayoutSystem {
-            layouts: saved
-                .layouts
-                .into_iter()
-                .map(|(layout, loaded)| (layout, loaded.state))
-                .collect(),
+            layouts: layouts.iter().map(|(layout, _)| (*layout, LayoutState::default())).collect(),
+            cameras: cam::Cameras::from_parts(
+                layouts.into_iter().map(|(layout, loaded)| (layout, loaded.camera)),
+            ),
             core: projection::decider(core),
             ..ScrollingLayoutSystem::default()
         }
@@ -1648,7 +1181,8 @@ impl Serialize for ScrollingLayoutSystem {
         let layouts: Vec<_> =
             crate::model::slot_table::saved(self.core.layouts(), |layout, a| SavedLayout {
                 view: projection::view(a),
-                state: &self.layouts[layout],
+                geometry: self.layouts[layout].geometry.as_ref(),
+                camera: self.cameras.get(layout).expect("a camera for each layout"),
             })
             .collect();
         let mut saved = serializer.serialize_struct("ScrollingLayoutSystem", 1)?;
@@ -1669,16 +1203,41 @@ impl ScrollingLayoutSystem {
         self.core.arrangement(layout).map(projection::view)
     }
 
+    /// `layout`'s geometry as the camera reads it; none before its first pass.
+    fn spans(&self, layout: LayoutId) -> Option<Spans> {
+        self.layouts.get(layout)?.geometry.as_ref().map(Geometry::spans)
+    }
+
+    /// `layout`'s camera.
+    fn camera(&self, layout: LayoutId) -> Option<&Camera> { self.cameras.get(layout) }
+
+    /// One event of `layout`'s camera; what it answered.
+    fn step_camera(&mut self, layout: LayoutId, event: CameraEvent) -> cam::Answer<ColumnId> {
+        self.cameras.step(cam::CamerasEvent::Camera(layout, event))
+    }
+
     /// The camera brought round to show `layout`'s selected column.
     fn reveal(&mut self, layout: LayoutId) {
-        if let (Some(view), Some(state)) = (self.view(layout), self.layouts.get_mut(layout)) {
-            state.reveal(&view, &self.settings);
+        if let Some(view) = self.view(layout) {
+            let revealed = CameraEvent::Revealed {
+                spans: self.spans(layout),
+                facts: facts(&view),
+                settings: camera_settings(&self.settings),
+            };
+            self.step_camera(layout, revealed);
         }
     }
 
     /// The camera's choice made on the core: `column` made `layout`'s active one.
     fn activate_chosen(core: &mut projection::Decider, layout: LayoutId, column: ColumnId) {
         core.activate_column(layout, rift_core::layout::columns::ColumnId(column.0));
+    }
+
+    /// A column the camera answered, made active on the core.
+    fn apply_answer(&mut self, layout: LayoutId, answer: cam::Answer<ColumnId>) {
+        if let cam::Answer::Activate(column) = answer {
+            Self::activate_chosen(&mut self.core, layout, column);
+        }
     }
 
     /// What the camera's half of an edit needs from before it: the arrangement, the core's
@@ -1703,7 +1262,22 @@ impl ScrollingLayoutSystem {
     ) -> Option<ArrangementView> {
         let after = self.view(layout)?;
         let state = self.layouts.get_mut(layout)?;
-        state.rebuilt(&after, &self.settings, self.core.left_out(), hold, before);
+        let hold = match hold {
+            Hold::Selection => before.id.zip(before.old_x).map(|(column, x)| cam::HeldAt {
+                window: before.window,
+                column,
+                x,
+            }),
+            Hold::Strip => None,
+        };
+        let event = rebuilt(
+            &mut state.geometry,
+            &after,
+            &self.settings,
+            self.core.left_out(),
+            hold,
+        );
+        self.step_camera(layout, event);
         Some(after)
     }
 
@@ -1774,69 +1348,44 @@ impl ScrollingLayoutSystem {
     }
 
     fn insert(&mut self, layout: LayoutId, wid: WindowId) {
-        let (Some(state), Some(view)) = (self.layouts.get(layout), self.view(layout)) else {
+        let Some(view) = self.view(layout) else {
             return;
         };
-        if self.core.contains_window(layout, wid) {
+        if !self.layouts.contains_key(layout) || self.core.contains_window(layout, wid) {
             return;
         }
-        let bookmark = state.bookmark(&view);
-        self.layouts[layout].camera.restored_view = None;
+        let inserting = CameraEvent::Inserting {
+            spans: self.spans(layout),
+            facts: facts(&view),
+        };
+        self.step_camera(layout, inserting);
         self.edited(layout, |core| core.insert(layout, wid));
-        let view = self.view(layout).expect("the layout the edit was made in");
-        let state = &mut self.layouts[layout];
-        state.camera.transient_restore = bookmark;
-        state.reveal(&view, &self.settings);
+        self.reveal(layout);
     }
 
     /// `wid` removed from `layout` by the core, then the camera's answer: the view remembered
     /// before the window came (when the selection's column went with it), the view before a
-    /// fullscreen (when the window was fullscreen), or else the new selection revealed. Each
-    /// column the camera chooses is made active on the core before the next removal.
+    /// fullscreen (when the window was fullscreen), or else the new selection revealed.
     fn remove_from_layout(&mut self, layout: LayoutId, wid: WindowId) {
         // The view the camera remembers from before the window came: the core shows its column
         // if the selection's column goes (upstream's unified fallback, bafcc444).
-        let remembered = self.layouts.get(layout).and_then(|state| {
-            let bookmark = state.camera.transient_restore.as_ref()?;
-            Some(rift_core::layout::columns::ColumnId(bookmark.column.0))
-        });
+        let remembered = (self.camera(layout))
+            .and_then(|camera| camera.transient_restore())
+            .map(|bookmark| rift_core::layout::columns::ColumnId(bookmark.column.0));
         let Some(removal) =
             self.edited(layout, |core| core.remove_from(layout, wid, remembered)).flatten()
         else {
             return;
         };
-        let Self { core, layouts, settings } = self;
-        let state = &mut layouts[layout];
-        let view = |core: &projection::Decider| {
-            projection::view(core.arrangement(layout).expect("the layout the edit was made in"))
+        let view = self.view(layout).expect("the layout the edit was made in");
+        let removed = CameraEvent::WindowRemoved {
+            active_removed: removal.active_removed,
+            column_removed: removal.column_removed,
+            spans: self.spans(layout),
+            facts: facts(&view),
+            settings: camera_settings(&self.settings),
         };
-        let restore = if removal.active_removed && removal.column_removed {
-            state.camera.transient_restore.take()
-        } else {
-            None
-        };
-        // Restored only when it is the column the core showed.
-        let shown = {
-            let now = view(core);
-            now.columns.get(now.active_column).map(|c| c.id)
-        };
-        let restored = restore
-            .filter(|bookmark| Some(bookmark.column) == shown)
-            .and_then(|bookmark| state.restore(&view(core), bookmark));
-        // A return owed to the window removed was reconciled by the edit's settle: the window's
-        // column, if it survives, is the active one, whose return the settle restores.
-        if removal.active_removed && restored.is_none() {
-            state.reveal(&view(core), settings);
-        }
-        let after = view(core);
-        if state
-            .camera
-            .transient_restore
-            .as_ref()
-            .is_some_and(|b| !after.columns.iter().any(|c| c.id == b.column))
-        {
-            state.camera.transient_restore = None;
-        }
+        self.step_camera(layout, removed);
     }
 
     pub(crate) fn prepare(
@@ -1848,27 +1397,35 @@ impl ScrollingLayoutSystem {
         gaps: &GapSettings,
         shadow: crate::layout_engine::Shadow,
     ) {
-        let Self { core, layouts, settings } = self;
+        let before = self.spans(layout);
+        let Self { core, layouts, settings, .. } = self;
         // The windows left out as the pass starts (preserving widths leaves them as they are).
         let left_out = core.left_out().clone();
-        if let Some(state) = layouts.get_mut(layout) {
-            state.prepare_geometry(
-                settings,
-                &left_out,
-                screen,
-                constraints,
-                revision,
-                gaps,
-                shadow,
-                |preserve| {
-                    if preserve {
-                        projection::preserve(core, layout, screen, gaps, |window| {
-                            constraints.get(&window).map(|c| c.locked_width)
-                        });
-                    }
-                    projection::view(core.arrangement(layout).expect("a layout the core holds"))
-                },
-            );
+        let Some(state) = layouts.get_mut(layout) else {
+            return;
+        };
+        let prepared = prepare_geometry(
+            &mut state.geometry,
+            before,
+            settings,
+            &left_out,
+            screen,
+            constraints,
+            revision,
+            gaps,
+            shadow,
+            |preserve| {
+                if preserve {
+                    projection::preserve(core, layout, screen, gaps, |window| {
+                        constraints.get(&window).map(|c| c.locked_width)
+                    });
+                }
+                projection::view(core.arrangement(layout).expect("a layout the core holds"))
+            },
+            camera_time(Instant::now()),
+        );
+        if let Some(prepared) = prepared {
+            self.step_camera(layout, prepared);
         }
     }
 
@@ -1882,7 +1439,9 @@ impl ScrollingLayoutSystem {
         park: bool,
         shadow: crate::layout_engine::Shadow,
     ) -> Vec<(WindowId, CGRect)> {
-        let (Some(state), Some(view)) = (self.layouts.get(layout), self.view(layout)) else {
+        let (Some(state), Some(camera), Some(view)) =
+            (self.layouts.get(layout), self.camera(layout), self.view(layout))
+        else {
             return Vec::new();
         };
         if let Some(g) = &state.geometry
@@ -1892,14 +1451,16 @@ impl ScrollingLayoutSystem {
                 || (!self.settings.preserve_window_sizes
                     && g.same_projected_constraints(constraints)))
         {
-            return Self::translate_frames(&view, state, g, park, shadow);
+            return Self::translate_frames(&view, camera, g, park, shadow);
         }
-        let mut camera = state.camera.clone();
-        camera.restored_view = camera.restored_view.or_else(|| state.bookmark(&view));
-        let mut fallback = LayoutState { camera, geometry: None };
-        // This pass is not committed: the widths it preserves are a copy's.
+        // This pass is not committed: a copy of the camera is prepared on a fresh geometry, and
+        // the widths it preserves are a copy's.
+        let mut camera = camera.clone();
+        let mut geometry = None;
         let mut preserved = None;
-        fallback.prepare_geometry(
+        let prepared = prepare_geometry(
+            &mut geometry,
+            self.spans(layout),
             &self.settings,
             self.core.left_out(),
             screen,
@@ -1920,33 +1481,29 @@ impl ScrollingLayoutSystem {
                 preserved = Some(preserved_view.clone());
                 preserved_view
             },
+            camera_time(Instant::now()),
         );
+        camera.step(prepared.expect("a fresh geometry is always prepared"));
         let view = preserved.unwrap_or(view);
-        Self::translate_frames(
-            &view,
-            &fallback,
-            fallback.geometry.as_ref().unwrap(),
-            park,
-            shadow,
-        )
+        Self::translate_frames(&view, &camera, geometry.as_ref().unwrap(), park, shadow)
     }
 
     /// The strip's frames on screen: the core's (policy (a)), with the system's own
     /// ([`Self::shadow_translation`]) their shadow.
     fn translate_frames(
         view: &ArrangementView,
-        state: &LayoutState,
+        camera: &Camera,
         g: &Geometry,
         park: bool,
         shadow: crate::layout_engine::Shadow,
     ) -> Vec<(WindowId, CGRect)> {
-        let (world, camera, fullscreen) = shown(view, g, state.camera.viewport.offset(), park);
+        let (world, core_camera, fullscreen) = shown(view, g, camera.viewport().offset(), park);
         crate::layout_engine::core_geometry::decide_translation(
             &world,
-            camera,
+            core_camera,
             &fullscreen,
             shadow,
-            || Self::shadow_translation(view, state, g, park),
+            || Self::shadow_translation(view, camera, g, park),
         )
     }
 
@@ -1954,16 +1511,16 @@ impl ScrollingLayoutSystem {
     /// decides (policy (a)), the shadow `translate_frames` holds the core's to.
     fn shadow_translation(
         view: &ArrangementView,
-        state: &LayoutState,
+        camera: &Camera,
         g: &Geometry,
         park: bool,
     ) -> Vec<(WindowId, CGRect)> {
-        let offset = state.camera.viewport.offset();
+        let offset = camera.viewport().offset();
         let frames: Vec<(WindowId, CGRect)> = g
             .frames
             .iter()
             .map(move |&(wid, frame)| {
-                let frame = state.fullscreen_frame(view, g, wid).unwrap_or_else(|| {
+                let frame = fullscreen_frame(view, g, wid).unwrap_or_else(|| {
                     translate_frame(frame, offset, g.tiling, g.screen, park).round()
                 });
                 (wid, frame)
@@ -1973,10 +1530,8 @@ impl ScrollingLayoutSystem {
     }
 
     pub(crate) fn finish_viewport(&mut self, layout: LayoutId) {
-        if let Some(state) = self.layouts.get_mut(layout)
-            && state.geometry.is_some()
-        {
-            state.camera.viewport.finish();
+        if self.spans(layout).is_some() {
+            self.step_camera(layout, CameraEvent::Finished);
         }
     }
 
@@ -1985,13 +1540,12 @@ impl ScrollingLayoutSystem {
         layout: LayoutId,
     ) -> Option<(ViewportPresentation, Vec<(WindowId, CGRect, bool)>)> {
         let state = self.layouts.get(layout)?;
+        let camera = self.camera(layout)?;
         let view = self.view(layout)?;
         let g = state.geometry.as_ref()?;
-        let mut motion = state.camera.motion.clone();
-        motion.samples.reserve(64_usize.saturating_sub(motion.samples.len()));
-        let camera = ViewportPresentation {
-            viewport: state.camera.viewport.clone(),
-            motion: Arc::new(Mutex::new(motion)),
+        let presentation = ViewportPresentation {
+            viewport: *camera.viewport(),
+            motion: Arc::new(Mutex::new(camera.motion().clone())),
             bounds: g.bounds,
             tiling: g.tiling,
             screen: g.screen,
@@ -2000,12 +1554,11 @@ impl ScrollingLayoutSystem {
             .frames
             .iter()
             .map(|&(wid, frame)| {
-                state
-                    .fullscreen_frame(&view, g, wid)
+                fullscreen_frame(&view, g, wid)
                     .map_or_else(|| (wid, frame.round(), false), |frame| (wid, frame, true))
             })
             .collect();
-        Some((camera, frames))
+        Some((presentation, frames))
     }
 
     /// A camera ended: nothing presents its viewport any more, so it does not stay animating
@@ -2013,70 +1566,60 @@ impl ScrollingLayoutSystem {
     /// the moment). It ends at its target, where the camera sent the windows it presented and
     /// where the core wrote the ones it left; a gesture's camera ends where the hand left it.
     pub(crate) fn commit_ended_viewport(&mut self, layout: LayoutId, p: &PresentedViewport) {
-        self.commit_viewport(layout, p, Ended::Yes);
+        self.commit_viewport(layout, p, cam::Ended::Yes);
     }
 
     /// The presenter's progress taken back (`Viewport::presented`): never over a target the
     /// layout set since the presentation began.
     pub(crate) fn commit_presented_viewport(&mut self, layout: LayoutId, p: &PresentedViewport) {
-        self.commit_viewport(layout, p, Ended::No);
+        self.commit_viewport(layout, p, cam::Ended::No);
     }
 
-    fn commit_viewport(&mut self, layout: LayoutId, p: &PresentedViewport, ended: Ended) {
-        if let Some(state) = self.layouts.get_mut(layout) {
-            let viewport = std::mem::take(&mut state.camera.viewport);
-            state.camera.viewport = viewport.presented(&p.camera, ended);
-            state.camera.motion = p.motion.lock().clone();
-        }
+    fn commit_viewport(&mut self, layout: LayoutId, p: &PresentedViewport, ended: cam::Ended) {
+        let presented = CameraEvent::Presented {
+            presented: p.camera,
+            motion: p.motion.lock().clone(),
+            ended,
+        };
+        self.step_camera(layout, presented);
     }
 
     /// Legacy normalized strip delta; boundary recognition is owned by the caller.
     pub fn scroll_by_delta(&mut self, layout: LayoutId, delta: f64) -> Option<(Direction, f64)> {
-        if !delta.is_finite() {
-            return None;
-        }
         let view = self.view(layout)?;
-        let state = self.layouts.get_mut(layout)?;
-        let g = state.geometry.as_ref()?;
-        let column = LayoutState::active_column_geometry(&view, g)?;
-        let step = column.width + g.gaps.inner.horizontal;
-        let raw = state.camera.viewport.offset() + delta * step;
-        state.camera.viewport.set_target(g.clamp(raw));
-        if raw < g.bounds.0 {
-            Some((Direction::Left, (g.bounds.0 - raw) / step))
-        } else if raw > g.bounds.1 {
-            Some((Direction::Right, (raw - g.bounds.1) / step))
-        } else {
-            None
+        let gap = self.layouts.get(layout)?.geometry.as_ref()?.gaps.inner.horizontal;
+        let scrolled = CameraEvent::ScrollBy {
+            delta,
+            spans: self.spans(layout),
+            facts: facts(&view),
+            gap,
+        };
+        match self.step_camera(layout, scrolled) {
+            cam::Answer::Excess(cam::Edge::Left, columns) => Some((Direction::Left, columns)),
+            cam::Answer::Excess(cam::Edge::Right, columns) => Some((Direction::Right, columns)),
+            _ => None,
         }
     }
 
     pub fn viewport_gesture_available(&self, layout: LayoutId) -> bool {
-        let (Some(state), Some(view)) = (self.layouts.get(layout), self.view(layout)) else {
+        let (Some(_), Some(view)) = (self.spans(layout), self.view(layout)) else {
             return false;
         };
-        state.geometry.is_some()
-            && self
-                .core
-                .selected_window(layout)
-                .is_some_and(|wid| !view.fullscreen.contains_key(&wid))
+        self.core
+            .selected_window(layout)
+            .is_some_and(|wid| !view.fullscreen.contains_key(&wid))
     }
 
     pub fn begin_viewport_gesture(&mut self, layout: LayoutId, now: Instant) -> bool {
-        if !self.viewport_gesture_available(layout) {
+        let Some(view) = self.view(layout) else {
             return false;
-        }
-        let state = &mut self.layouts[layout];
-        state.camera.transient_restore = None;
-        if matches!(state.camera.viewport, Viewport::Gesture(_)) {
-            return false;
-        }
-        state.camera.motion.overscroll = 0.0;
-        state.camera.motion.samples.clear();
-        state.camera.motion.samples.reserve(64);
-        state.camera.viewport.sample(now, 1.0);
-        state.camera.viewport = Viewport::Gesture(state.camera.viewport.offset());
-        true
+        };
+        let began = CameraEvent::GestureBegan {
+            now: camera_time(now),
+            spans: self.spans(layout),
+            facts: facts(&view),
+        };
+        self.step_camera(layout, began) == cam::Answer::Began(true)
     }
 
     /// Pixel deltas, independent of any native input source; focus stays fixed.
@@ -2086,15 +1629,15 @@ impl ScrollingLayoutSystem {
         delta: f64,
         timestamp: Duration,
     ) -> Option<f64> {
-        if !delta.is_finite() {
-            return None;
-        }
-        let state = self.layouts.get_mut(layout)?;
-        let Viewport::Gesture(offset) = &mut state.camera.viewport else {
-            return None;
+        let moved = CameraEvent::GestureMoved {
+            delta,
+            at: gesture_time(timestamp),
+            spans: self.spans(layout),
         };
-        let g = state.geometry.as_ref()?;
-        state.camera.motion.update(offset, g.bounds, delta, timestamp)
+        match self.step_camera(layout, moved) {
+            cam::Answer::Moved(moved) => Some(moved),
+            _ => None,
+        }
     }
 
     /// Normalize only at the layout boundary, using cached working geometry.
@@ -2108,7 +1651,8 @@ impl ScrollingLayoutSystem {
         self.update_viewport_gesture(layout, delta * width, timestamp)
     }
 
-    /// Release projection is niri's exponential touchpad deceleration, in camera pixels.
+    /// Release projection is niri's exponential touchpad deceleration, in camera pixels. The
+    /// camera chooses the column it settles on, which the core makes active.
     pub fn end_viewport_gesture(
         &mut self,
         layout: LayoutId,
@@ -2116,48 +1660,41 @@ impl ScrollingLayoutSystem {
         animate: bool,
         started: Instant,
     ) -> Option<ViewportRelease> {
-        // The camera chooses the column it settles on, which the core makes active.
-        self.end_viewport_gesture_system(layout, timestamp, animate, started)
+        let view = self.view(layout)?;
+        let ended = CameraEvent::GestureEnded {
+            at: gesture_time(timestamp),
+            animate,
+            started: camera_time(started),
+            spans: self.spans(layout),
+            facts: facts(&view),
+            settings: camera_settings(&self.settings),
+        };
+        let answer = self.step_camera(layout, ended);
+        self.released(layout, answer)
     }
 
-    fn end_viewport_gesture_system(
+    /// A release or snap the camera answered: its column made active on the core.
+    fn released(
         &mut self,
         layout: LayoutId,
-        timestamp: Duration,
-        animate: bool,
-        started: Instant,
+        answer: cam::Answer<ColumnId>,
     ) -> Option<ViewportRelease> {
-        let state = self.layouts.get_mut(layout)?;
-        let Viewport::Gesture(offset) = state.camera.viewport else {
+        let cam::Answer::Released(release) = answer else {
             return None;
         };
-        if !state.camera.motion.push(0.0, timestamp) {
-            return None;
-        }
-        let velocity = state.camera.motion.velocity();
-        let projected = offset - velocity / (1000.0 * 0.997_f64.ln());
-        let release = self.settle(layout, projected, velocity, true)?;
-        if animate {
-            self.layouts[layout].camera.viewport = Viewport::springing(
-                Rest::At,
-                release.from_offset,
-                release.offset,
-                release.velocity,
-                started,
-            );
-        }
-        Some(release)
+        Self::activate_chosen(&mut self.core, layout, release.column);
+        Some(ViewportRelease {
+            window: self.core.selected_window(layout)?,
+            offset: release.offset,
+            from_offset: release.from_offset,
+            velocity: release.velocity,
+        })
     }
 
     /// Settle where cancellation occurred, with no artificial fling or focus change.
     pub fn cancel_viewport_gesture(&mut self, layout: LayoutId) {
-        if let Some(state) = self.layouts.get_mut(layout)
-            && state.camera.viewport.moving()
-        {
-            state.camera.viewport =
-                Viewport::at(state.clamp_offset(state.camera.viewport.offset()));
-            state.camera.motion = MotionHistory::default();
-        }
+        let cancelled = CameraEvent::GestureCancelled { spans: self.spans(layout) };
+        self.step_camera(layout, cancelled);
     }
 
     /// Signed travel beyond resting bounds, in working-area widths.
@@ -2166,102 +1703,31 @@ impl ScrollingLayoutSystem {
             .get(layout)
             .and_then(|state| {
                 let g = state.geometry.as_ref()?;
-                Some(state.camera.motion.overscroll / g.tiling.size.width)
+                Some(self.camera(layout)?.motion().overscroll() / g.tiling.size.width)
             })
             .unwrap_or(0.0)
     }
 
-    fn settle(
-        &mut self,
-        layout: LayoutId,
-        projected: f64,
-        velocity: f64,
-        gesture_release: bool,
-    ) -> Option<ViewportRelease> {
-        let view = self.view(layout)?;
-        let state = self.layouts.get_mut(layout)?;
-        let g = state.geometry.as_ref()?;
-        let from_offset = state.camera.viewport.offset();
-        let niri = self.settings.focus_navigation_style == ScrollingFocusNavigationStyle::Niri;
-        // After a gesture, a tie goes to a point showing the active column (asked only of a
-        // strip with resting points, so with columns).
-        let away = |snap: &SnapPoint| {
-            gesture_release && snap.column != view.columns[view.active_column].id
-        };
-        let snap = g.snaps.iter().min_by(|a, b| {
-            (a.offset - projected)
-                .abs()
-                .total_cmp(&(b.offset - projected).abs())
-                .then_with(|| {
-                    if niri {
-                        // Niri sorts snaps by position before nearest-point selection.
-                        a.offset.total_cmp(&b.offset)
-                    } else {
-                        away(a).cmp(&away(b))
-                    }
-                })
-        })?;
-        let mut column = snap.column;
-        if niri {
-            // Choose the furthest fully visible column
-            // in the direction of travel.
-            let past = |c: &&ColumnGeometry| c.id != snap.column;
-            column = if projected >= from_offset {
-                g.columns
-                    .iter()
-                    .skip_while(past)
-                    .skip(1)
-                    .take_while(|next| {
-                        next.world_x + next.width <= snap.offset + g.tiling.size.width
-                    })
-                    .last()
-                    .map_or(column, |next| next.id)
-            } else {
-                g.columns
-                    .iter()
-                    .rev()
-                    .skip_while(past)
-                    .skip(1)
-                    .take_while(|next| next.world_x >= snap.offset)
-                    .last()
-                    .map_or(column, |next| next.id)
-            };
-        }
-        let offset = snap.offset;
-        let canonical_index = view.columns.iter().position(|c| c.id == column)?;
-        // A snap to another column owes no return (gate 4).
-        if canonical_index != view.active_column {
-            state.camera.showing = Showing::Strip;
-        }
-        state.camera.transient_restore = None;
-        state.camera.viewport.set_target(offset);
-        // The camera chose the column; the core makes it active.
-        Self::activate_chosen(&mut self.core, layout, column);
-        Some(ViewportRelease {
-            window: self.core.selected_window(layout)?,
-            offset,
-            from_offset,
-            velocity,
-        })
-    }
-
     pub fn snap_to_nearest_column(&mut self, layout: LayoutId) -> Option<WindowId> {
-        // The camera chooses the column, which the core makes active.
-        self.snap_to_nearest_column_system(layout)
+        let view = self.view(layout)?;
+        let snapped = CameraEvent::Snapped {
+            spans: self.spans(layout),
+            facts: facts(&view),
+            settings: camera_settings(&self.settings),
+        };
+        let answer = self.step_camera(layout, snapped);
+        self.released(layout, answer).map(|release| release.window)
     }
 
     pub fn center_selected_column(&mut self, layout: LayoutId) {
         let Some(view) = self.view(layout) else {
             return;
         };
-        let Some(state) = self.layouts.get_mut(layout) else {
-            return;
+        let centred = CameraEvent::Centred {
+            spans: self.spans(layout),
+            facts: facts(&view),
         };
-        if let Some(offset) =
-            state.geometry.as_ref().and_then(|g| LayoutState::centred_offset(&view, g))
-        {
-            state.camera.viewport.aim(offset, Rest::Centred);
-        }
+        self.step_camera(layout, centred);
     }
 
     pub fn switch_preset_column_width(&mut self, layout: LayoutId, backwards: bool) -> bool {
@@ -2273,37 +1739,33 @@ impl ScrollingLayoutSystem {
         let Some(before) = self.view(layout) else {
             return Vec::new();
         };
-        let Self { core, layouts, .. } = self;
-        let Some(state) = layouts.get_mut(layout) else {
+        if !self.layouts.contains_key(layout) {
             return Vec::new();
-        };
-        let view = |core: &projection::Decider| {
-            projection::view(core.arrangement(layout).expect("a layout the core holds"))
-        };
-        // The view before a fullscreen is the one the camera shows now.
-        let bookmark = state.bookmark(&before);
-        match core.toggle_fullscreen(layout, within_gaps) {
+        }
+        let toggled = self.core.toggle_fullscreen(layout, within_gaps);
+        let after = self.view(layout).expect("a layout the core holds");
+        let spans = self.spans(layout);
+        match toggled {
             Fullscreened::Nothing => Vec::new(),
-            Fullscreened::Left(wid) => {
-                if let Some(return_to) = state.camera.showing.take_owed_to(wid)
-                    && let Some(column) = state.consume_return(&view(core), return_to)
-                {
-                    Self::activate_chosen(core, layout, column);
-                }
-                vec![wid]
+            Fullscreened::Left(window) => {
+                let left = CameraEvent::FullscreenLeft {
+                    window,
+                    spans,
+                    facts: facts(&after),
+                };
+                let answer = self.step_camera(layout, left);
+                self.apply_answer(layout, answer);
+                vec![window]
             }
-            Fullscreened::Entered(wid) => {
-                let after = view(core);
-                // A return already owed is kept: the view before the first fullscreen (gate 1).
-                if let (Showing::Strip, Some(return_to)) = (&state.camera.showing, bookmark) {
-                    state.camera.showing = Showing::Fullscreen { window: wid, return_to };
-                }
-                if let Some(column) = state.geometry.as_ref().and_then(|g| {
-                    after.columns.get(after.active_column).and_then(|c| g.column(c.id))
-                }) {
-                    state.camera.viewport.set_target(column.world_x);
-                }
-                vec![wid]
+            Fullscreened::Entered(window) => {
+                let entered = CameraEvent::FullscreenEntered {
+                    window,
+                    spans,
+                    before: facts(&before),
+                    after: facts(&after),
+                };
+                self.step_camera(layout, entered);
+                vec![window]
             }
         }
     }
@@ -2416,22 +1878,16 @@ impl ScrollingLayoutSystem {
         if !selected || already {
             return selected;
         }
-        let (Some(view), Some(state)) = (self.view(layout), self.layouts.get_mut(layout)) else {
+        let Some(view) = self.view(layout) else {
             return selected;
         };
-        // Focusing another column ends a centred view (upstream #718).
-        if column != Some(view.active_column) {
-            state.camera.viewport.uncentre();
-        }
-        state.camera.restored_view = None;
-        state.camera.transient_restore = None;
-        // Selecting another column than the return's owes no return (gate 3).
-        if let Showing::Fullscreen { return_to, .. } = &state.camera.showing
-            && return_to.column != view.columns[view.active_column].id
-        {
-            state.camera.showing = Showing::Strip;
-        }
-        state.reveal(&view, &self.settings);
+        let event = CameraEvent::Selected {
+            column_changed: column != Some(view.active_column),
+            spans: self.spans(layout),
+            facts: facts(&view),
+            settings: camera_settings(&self.settings),
+        };
+        self.step_camera(layout, event);
         true
     }
 
@@ -2461,10 +1917,10 @@ impl ScrollingLayoutSystem {
             }
             WindowDropAction::ConsumeOrExpel(_) => return false,
         };
-        let Some(state) = self.layouts.get_mut(layout) else {
+        if !self.layouts.contains_key(layout) {
             return false;
-        };
-        state.camera.transient_restore = None;
+        }
+        self.step_camera(layout, CameraEvent::TransientForgotten);
         self.edited(layout, |core| {
             core.drop_window(
                 layout,
@@ -2504,7 +1960,7 @@ impl ScrollingLayoutSystem {
         else {
             return false;
         };
-        self.layouts[layout].camera.transient_restore = None;
+        self.step_camera(layout, CameraEvent::TransientForgotten);
         if !matches!(moved, Moved::Row(_)) {
             self.reveal(layout);
         }
@@ -2538,6 +1994,7 @@ impl ScrollingLayoutSystem {
         // Before a layout's first projection, discovery order does not replace its saved
         // selection, nor does any change while a saved view is being restored (upstream #663).
         let unprojected = |state: &LayoutState| participates && state.geometry.is_none();
+        let cameras = &self.cameras;
         let holding: Vec<(LayoutId, BeforeEdit)> = self
             .layouts
             .iter()
@@ -2555,10 +2012,11 @@ impl ScrollingLayoutSystem {
             .layouts
             .iter()
             .filter_map(|(layout, state)| {
-                if unprojected(state) || state.camera.restored_view.is_some() {
+                let camera = cameras.get(layout)?;
+                if unprojected(state) || camera.restored_view().is_some() {
                     return Some((layout, CameraMemory::Restoring));
                 }
-                let bookmark = state.camera.transient_restore.as_ref()?;
+                let bookmark = camera.transient_restore()?;
                 Some((layout, CameraMemory::Remembers(CoreColumnId(bookmark.column.0))))
             })
             .collect();
@@ -2572,50 +2030,38 @@ impl ScrollingLayoutSystem {
             // The camera follows a column the core moved to: back to the view it remembers, if
             // that is the column, or else revealing it (upstream #705, f168b6c6, and bafcc444).
             if after.active_column != before.view.active_column {
-                let shown = after.columns[after.active_column].id;
-                let state = &mut self.layouts[layout];
-                let restored = state
-                    .camera
-                    .transient_restore
-                    .take()
-                    .filter(|bookmark| bookmark.column == shown)
-                    .and_then(|bookmark| state.restore(&after, bookmark));
-                if restored.is_none() {
-                    state.reveal(&after, &self.settings);
-                }
+                let followed = CameraEvent::Followed {
+                    spans: self.spans(layout),
+                    facts: facts(&after),
+                    settings: camera_settings(&self.settings),
+                };
+                self.step_camera(layout, followed);
             }
         }
         true
     }
 
     fn create_layout_system(&mut self) -> LayoutId {
-        // The core allocates the layout's id; the camera's state is kept under it.
+        // The core allocates the layout's id; the camera and geometry are kept under it.
         let layout = self.core.create_layout();
         self.layouts.insert(layout, LayoutState::default());
+        self.cameras.step(cam::CamerasEvent::Created(layout));
         layout
     }
 
     fn clone_layout_system(&mut self, layout: LayoutId) -> LayoutId {
-        let mut state = self.layouts.get(layout).cloned().unwrap_or_default();
-        match state.camera.viewport {
-            Viewport::Resting(_, Motion::Pending { .. }) => state.camera.viewport.finish(),
-            // An in-flight clone stops where it is, so it no longer rests centred.
-            Viewport::Resting(_, Motion::Animation(_)) => {
-                state.camera.viewport =
-                    Viewport::at(state.clamp_offset(state.camera.viewport.offset()));
-            }
-            Viewport::Uninitialized
-            | Viewport::Gesture(_)
-            | Viewport::Resting(_, Motion::Static(_)) => {}
-        }
+        let state = self.layouts.get(layout).cloned().unwrap_or_default();
+        let spans = self.spans(layout);
         let clone = self.core.clone_layout(layout);
         self.layouts.insert(clone, state);
+        self.cameras.step(cam::CamerasEvent::Cloned { from: layout, to: clone, spans });
         clone
     }
 
     fn remove_layout_system(&mut self, layout: LayoutId) {
         self.core.remove_layout(layout);
         self.layouts.remove(layout);
+        self.cameras.step(cam::CamerasEvent::Removed(layout));
     }
 
     fn update_system(&mut self, change: WindowChange<'_>) {
@@ -2638,11 +2084,7 @@ impl ScrollingLayoutSystem {
                 self.core.replace_window(from, to);
                 for layout in holding {
                     // A return owed to the window follows it to its new identity.
-                    if let Some(state) = self.layouts.get_mut(layout)
-                        && let Some(return_to) = state.camera.showing.take_owed_to(from)
-                    {
-                        state.camera.showing = Showing::Fullscreen { window: to, return_to };
-                    }
+                    self.step_camera(layout, CameraEvent::Replaced { from, to });
                     self.edited(layout, |_| ());
                 }
             }
@@ -2697,14 +2139,14 @@ impl ScrollingLayoutSystem {
             LayoutEdit::Group(GroupEdit::Stack(_)) => {
                 let moved = self.edited(layout, |core| core.stack(layout)).unwrap_or_default();
                 if !moved.is_empty() {
-                    self.layouts[layout].camera.transient_restore = None;
+                    self.step_camera(layout, CameraEvent::TransientForgotten);
                 }
                 EditResult::Raise(moved)
             }
             LayoutEdit::Group(GroupEdit::Unstack(_)) => {
                 let moved = self.edited(layout, |core| core.unstack(layout)).unwrap_or_default();
                 if !moved.is_empty() {
-                    self.layouts[layout].camera.transient_restore = None;
+                    self.step_camera(layout, CameraEvent::TransientForgotten);
                 }
                 EditResult::Raise(moved)
             }
@@ -2764,11 +2206,6 @@ impl ScrollingLayoutSystem {
             self.reveal(layout);
         }
         changed
-    }
-
-    fn snap_to_nearest_column_system(&mut self, layout: LayoutId) -> Option<WindowId> {
-        let offset = self.layouts.get(layout)?.camera.viewport.offset();
-        self.settle(layout, offset, 0.0, false).map(|release| release.window)
     }
 }
 
@@ -2854,16 +2291,60 @@ pub(crate) mod tests {
             .unwrap_or_default()
             .into_iter()
     }
+    use rift_core::camera::{Motion, Presented, Rest, Showing, Viewport};
+
     use super::*;
 
     fn wid(index: u32) -> WindowId { WindowId::new(1, index) }
+
+    /// `layout`'s camera.
+    fn camera(system: &ScrollingLayoutSystem, layout: LayoutId) -> &Camera {
+        system.cameras.get(layout).expect("a camera for the layout")
+    }
+
+    /// `layout`'s camera with its viewport replaced by `viewport` (a test's setup).
+    fn seed_viewport(system: &mut ScrollingLayoutSystem, layout: LayoutId, viewport: Viewport) {
+        let c = camera(system, layout).clone();
+        let seeded = Camera::from_parts(
+            viewport,
+            c.motion().clone(),
+            c.transient_restore(),
+            *c.showing(),
+            c.restored_view(),
+        );
+        system.cameras.seed(layout, seeded);
+    }
+
+    /// The camera's settle decision on `layout` (`projected`, as a gesture's release or not),
+    /// its column made active as the system does.
+    fn settle(
+        system: &mut ScrollingLayoutSystem,
+        layout: LayoutId,
+        projected: f64,
+        velocity: f64,
+        gesture: bool,
+    ) -> Option<ViewportRelease> {
+        let (spans, view) = (system.spans(layout)?, system.view(layout)?);
+        let mut c = camera(system, layout).clone();
+        let settings = camera_settings(&system.settings);
+        let release = c.settle(&spans, &facts(&view), settings, projected, velocity, gesture)?;
+        system.cameras.seed(layout, c);
+        system.released(layout, cam::Answer::Released(release))
+    }
+
+    /// `layout`'s viewport aimed at `target` (a test's setup).
+    fn aim(system: &mut ScrollingLayoutSystem, layout: LayoutId, target: f64) {
+        let mut viewport = *camera(system, layout).viewport();
+        viewport.set_target(target);
+        seed_viewport(system, layout, viewport);
+    }
 
     #[test]
     fn a_camera_that_ends_before_arriving_leaves_its_viewport_at_the_target() {
         let mut f = Fixture::new(4);
         // The layout aims at 500; the presenter starts it there from 0.
-        f.system.layouts[f.layout].camera.viewport = Viewport::at(0.0);
-        f.system.layouts[f.layout].camera.viewport.set_target(500.0);
+        seed_viewport(&mut f.system, f.layout, Viewport::at(0.0));
+        aim(&mut f.system, f.layout, 500.0);
         let (mut p, _) = f.system.presentation(f.layout).unwrap();
         p.retarget(0.0, 0.0, Instant::now());
         let snapshot = p.snapshot(Instant::now());
@@ -2872,12 +2353,12 @@ pub(crate) mod tests {
         // Still presenting: the viewport keeps moving.
         f.system.commit_presented_viewport(f.layout, &snapshot);
         assert!(matches!(
-            &f.system.layouts[f.layout].camera.viewport,
+            camera(&f.system, f.layout).viewport(),
             Viewport::Resting(Rest::At, Motion::Animation(_))
         ));
         // Ended there: nothing will move it, so it is at its target, not stuck animating.
         f.system.commit_ended_viewport(f.layout, &snapshot);
-        let viewport = &f.system.layouts[f.layout].camera.viewport;
+        let viewport = camera(&f.system, f.layout).viewport();
         assert!(
             matches!(viewport, Viewport::Resting(_, Motion::Static(offset)) if *offset == 500.0),
             "{viewport:?}"
@@ -2894,7 +2375,7 @@ pub(crate) mod tests {
             f.system.update_width_settings((0.25, 0.1, 1.0));
             f.prepare();
             f.system.finish_viewport(f.layout);
-            f.system.layouts[f.layout].camera.viewport.set_target(250.0);
+            aim(&mut f.system, f.layout, 250.0);
             let (mut p, _) = f.system.presentation(f.layout).unwrap();
             if arrived {
                 // The presenter got there: it reports the camera still at 250.
@@ -2928,14 +2409,14 @@ pub(crate) mod tests {
         f.system.finish_viewport(f.layout);
         assert_eq!(f.target(), 1000.0);
         assert!(matches!(
-            f.system.layouts[f.layout].camera.showing,
+            *camera(&f.system, f.layout).showing(),
             Showing::Fullscreen { window, .. } if window == wid(3)
         ));
         f
     }
 
     fn owes_nothing(f: &Fixture) -> bool {
-        matches!(f.system.layouts[f.layout].camera.showing, Showing::Strip)
+        matches!(*camera(&f.system, f.layout).showing(), Showing::Strip)
     }
 
     #[test]
@@ -2965,7 +2446,7 @@ pub(crate) mod tests {
         f.select(4);
         assert_eq!(f.system.toggle_fullscreen(f.layout, false), vec![wid(4)]);
         assert!(matches!(
-            f.system.layouts[f.layout].camera.showing,
+            *camera(&f.system, f.layout).showing(),
             Showing::Fullscreen { window, .. } if window == wid(3)
         ));
         // Window 4 leaves: nothing was owed to it, and 3 is still fullscreen.
@@ -2995,12 +2476,12 @@ pub(crate) mod tests {
         let text = ron::to_string(&f.system).unwrap();
         let owed_to = |text: &str| {
             let system: ScrollingLayoutSystem = ron::from_str(text).unwrap();
-            match &system.layouts[f.layout].camera.showing {
+            match camera(&system, f.layout).showing() {
                 Showing::Fullscreen { window, return_to } => Some((*window, return_to.column)),
                 Showing::Strip => None,
             }
         };
-        let column = match &f.system.layouts[f.layout].camera.showing {
+        let column = match camera(&f.system, f.layout).showing() {
             Showing::Fullscreen { return_to, .. } => return_to.column,
             Showing::Strip => unreachable!("fullscreen_with_a_return_owed owes one"),
         };
@@ -3035,7 +2516,7 @@ pub(crate) mod tests {
         let mut f = fullscreen_with_a_return_owed();
         f.system.update(WindowChange::Replace(wid(3), wid(9)));
         assert!(matches!(
-            f.system.layouts[f.layout].camera.showing,
+            *camera(&f.system, f.layout).showing(),
             Showing::Fullscreen { window, .. } if window == wid(9)
         ));
         assert_eq!(f.system.toggle_fullscreen(f.layout, false), vec![wid(9)]);
@@ -3111,17 +2592,18 @@ pub(crate) mod tests {
 
         fn selected(&self) -> Option<WindowId> { self.system.selected_window(self.layout) }
 
-        fn target(&self) -> f64 { self.system.layouts[self.layout].camera.viewport.target() }
+        fn target(&self) -> f64 { camera(&self.system, self.layout).viewport().target() }
 
         /// Mid-scroll towards the end of a four-column strip, from 900 to 1000.
         fn scroll_towards_the_end(&mut self) {
-            self.system.layouts[self.layout].camera.viewport =
-                Viewport::springing(Rest::At, 900.0, 1000.0, 0.0, Instant::now());
+            let springing =
+                Viewport::springing(Rest::At, 900.0, 1000.0, 0.0, camera_time(Instant::now()));
+            seed_viewport(&mut self.system, self.layout, springing);
         }
 
         /// The drag still overscrolls at `offset`; release it and return where it settles.
         fn release_overscrolled_gesture(&mut self, offset: f64) -> f64 {
-            let viewport = &self.system.layouts[self.layout].camera.viewport;
+            let viewport = camera(&self.system, self.layout).viewport();
             assert!(matches!(viewport, Viewport::Gesture(_)), "{viewport:?}");
             assert_eq!(viewport.offset(), offset);
             self.system
@@ -3222,7 +2704,7 @@ pub(crate) mod tests {
         f.prepare();
         for (gesture, window) in [(true, 4), (false, 3)] {
             f.select(4);
-            let release = f.system.settle(f.layout, 1000.0, 0.0, gesture).unwrap();
+            let release = settle(&mut f.system, f.layout, 1000.0, 0.0, gesture).unwrap();
             assert_eq!((release.window, release.offset), (wid(window), 1000.0));
         }
     }
@@ -3243,8 +2725,8 @@ pub(crate) mod tests {
             // though the right end comes first among the resting points.
             (1000.0, 1250.0, 4, 1000.0),
         ] {
-            f.system.layouts[f.layout].camera.viewport = Viewport::at(from);
-            let release = f.system.settle(f.layout, projected, 0.0, true).unwrap();
+            seed_viewport(&mut f.system, f.layout, Viewport::at(from));
+            let release = settle(&mut f.system, f.layout, projected, 0.0, true).unwrap();
             assert_eq!(
                 (release.window, release.offset),
                 (wid(window), offset),
@@ -3269,14 +2751,14 @@ pub(crate) mod tests {
         // Four 500-point columns in a 1000-point view: the camera rests at 0 (the first column),
         // 250 and 750 (the middle two, centred) and 1000 (the last).
         for (offset, window, target) in [(700.0, 3, 750.0), (400.0, 2, 250.0), (900.0, 4, 1000.0)] {
-            f.system.layouts[f.layout].camera.viewport = Viewport::at(offset);
+            seed_viewport(&mut f.system, f.layout, Viewport::at(offset));
             assert_eq!(
                 f.system.snap_to_nearest_column(f.layout),
                 Some(wid(window)),
                 "from {offset}"
             );
             assert_eq!(
-                f.system.layouts[f.layout].camera.viewport.target(),
+                camera(&f.system, f.layout).viewport().target(),
                 target,
                 "from {offset}"
             );
@@ -3314,12 +2796,12 @@ pub(crate) mod tests {
                     orientation: ResizeOrientation::Vertical,
                 })
                 .discard();
-            let offset = f.system.layouts[f.layout].camera.viewport.start_offset();
+            let offset = camera(&f.system, f.layout).viewport().start_offset();
             f.system
                 .edit(f.layout, LayoutEdit::Group(GroupEdit::ConsumeOrExpel(direction)))
                 .discard();
             assert_eq!(f.selected(), Some(wid(2)));
-            assert_eq!(f.system.layouts[f.layout].camera.viewport.start_offset(), offset);
+            assert_eq!(camera(&f.system, f.layout).viewport().start_offset(), offset);
             assert_eq!(f.frame(2).size.width, 400.0);
             let tree = f.system.container_tree(f.layout);
             let expelled = tree
@@ -3465,7 +2947,7 @@ pub(crate) mod tests {
         for anchored in [true, false] {
             let (f, mut loaded) = restored_dormant();
             if !anchored {
-                loaded.layouts[f.layout].camera.restored_view = None;
+                loaded.step_camera(f.layout, CameraEvent::ViewForgotten);
             }
             for i in [1, 2, 3] {
                 loaded.set_window_participation(wid(i), true);
@@ -4190,10 +3672,9 @@ mod core_geometry_tests {
                     None => rng.length(-3000.0, 6000.0),
                 };
                 let park = rng.chance(70);
-                let mut shown_state = state.clone();
-                shown_state.camera.viewport = Viewport::at(offset);
+                let shown_camera = Camera::saved(offset, None, cam::Showing::Strip, None);
                 let upstream =
-                    ScrollingLayoutSystem::shadow_translation(&view, &shown_state, g, park);
+                    ScrollingLayoutSystem::shadow_translation(&view, &shown_camera, g, park);
                 let (world, camera, fullscreen) = shown(&view, g, offset, park);
                 let core: Vec<(WindowId, CGRect)> = translate(&world, camera, &fullscreen)
                     .into_iter()

@@ -15,7 +15,7 @@ use crate::actor::reactor::events::CameraMotion;
 use crate::actor::reactor::reconciler::CoreEvent;
 use crate::common::collections::{HashMap, HashSet};
 use crate::layout_engine::systems::scrolling::{
-    CameraSpring, PresentedViewport, ViewportPresentation,
+    PresentedViewport, ViewportPresentation, camera_time,
 };
 use crate::layout_engine::{LayoutId, LayoutSystem, LayoutSystemKind, VirtualWorkspaceId};
 use crate::sys::display_link::DisplayLink;
@@ -214,7 +214,7 @@ pub struct CameraAnimation {
     pub(super) presentation: ViewportPresentation,
     windows: Vec<PresentedWindow>,
     // The scale converts normalized spring tolerance to the largest pixel offset.
-    movement: Option<(CameraSpring, f64)>,
+    movement: Option<(rift_core::camera::Spring, f64)>,
     pub(super) gesture: Option<(Context, Control, f64, Duration)>,
     pub(super) active: bool,
     identity: CameraIdentity,
@@ -379,10 +379,10 @@ impl CameraAnimation {
         }
         let ongoing = self.presentation.sample(now, scale);
         let movement = self.movement.as_mut().map_or(0.0, |(spring, distance)| {
-            if spring.sample(now, scale * *distance) {
+            if spring.sample(camera_time(now), scale * *distance) {
                 0.0
             } else {
-                spring.current()
+                spring.current
             }
         });
         if movement == 0.0 {
@@ -463,8 +463,12 @@ impl CameraAnimation {
         let distance = self.windows.iter().fold(0.0_f64, |distance, window| {
             distance.max(window.move_from.x.abs()).max(window.move_from.y.abs())
         });
-        self.movement = (distance > 0.25 / self.scale)
-            .then(|| (CameraSpring::new(1.0, 0.0, 0.0, now), distance));
+        self.movement = (distance > 0.25 / self.scale).then(|| {
+            (
+                rift_core::camera::Spring::new(1.0, 0.0, 0.0, camera_time(now)),
+                distance,
+            )
+        });
     }
 
     fn begin(&mut self) {

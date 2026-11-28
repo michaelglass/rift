@@ -6,6 +6,7 @@
 //! ([`Kinds`]) so rift can run it on its own `WindowId`/`CGRect`/`Instant` with no conversion,
 //! and a foreign core (Roc) runs it on [`plain`] data, which crosses as words ([`plain::wire`]).
 
+pub mod camera;
 pub mod constraints;
 pub mod core;
 pub mod display_memory;

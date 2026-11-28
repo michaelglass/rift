@@ -738,6 +738,53 @@ What the camera is today: per layout, in `ScrollingLayoutSystem.layouts`, a `Cam
 
 Then E3c, then E1.
 
+**The lead's adjustments (2026-11-28):** `Time` is integer nanoseconds (U64), not F64 seconds:
+it crosses and compares exactly, and becomes F64 only inside the spring and velocity
+arithmetic, in the same order of operations on both sides. A spring keeps the times it was given
+(facts), never an elapsed duration (derived, stale every tick). At least one plant feeds a stale
+or reordered `now`.
+
+**Follow-up (named, not blocking E3-cam):** `Spans` is core state making a round trip through
+the host. `Geometry` is computed from state the core already owns (the columns, the
+constraints since E4, the screen), so it becomes a pure core function and the camera reads it
+directly; the host's prepared-frame cache then holds only what the presenter draws.
+
+**cam-1 and cam-2 together (2026-11-28): the camera is a core machine, and the scrolling
+system steps it.** A deviation from the plan, for a concrete reason: `rift_core::camera` is the
+camera code itself, moved with its inputs made explicit, so a shadow would have mirrored about
+thirty call sites into a second copy only to delete them one step later. What a shadow step
+would have proven is proven instead by the scrolling system's own tests (all of them, unchanged
+in what they assert) passing through the core, by the core's unit tests, and by plants. The Roc
+port (cam-3) brings the real differential.
+- `rift_core::camera::Cameras<L, C, W>` holds every scrolling layout's camera beside the columns
+  core; `ScrollingLayoutSystem` keeps only each layout's `Geometry` cache. Every camera change is
+  a `CamerasEvent` (`Created`, `Cloned`, `Removed`, or one layout's `CameraEvent`): `Prepared`
+  (a pass with new geometry, the settle point), `Rebuilt` (an edit's), `Revealed`, `Centred`,
+  `Inserting`, `WindowRemoved`, `Selected`, `Followed`, `TransientForgotten`, `ViewForgotten`,
+  `Replaced`, `FullscreenLeft`, `FullscreenEntered`, `Finished`, `Presented`, `ScrollBy`,
+  `GestureBegan`, `GestureMoved`, `GestureEnded`, `GestureCancelled`, `Snapped`.
+- Each event carries the `Spans` (the cache's projection) and `Facts` (the columns core's
+  arrangement) it reads; the camera keeps neither. Which column an edit holds still is the
+  camera's choice from those facts (`HeldAt` carries the selection as it was before the edit).
+- Answers: `Activate(column)` (a fullscreen's return), `Released` (a release or snap: the column
+  chosen, which the host has the columns core make active), `Excess`, `Began`, `Moved`.
+- The clock: the host converts `Instant` once, at its edge (`camera_time`, nanoseconds since the
+  process first asked), and a gesture's timestamps (`gesture_time`); the settle point's
+  `Instant::now()` is the event's `now`. The presenter's copy (`ViewportPresentation`) and the
+  reactor's frame animation use the core's `Viewport` and `Spring` with the same conversion.
+- The saved form is unchanged (a saved non-finite offset still reads as 0).
+- Tests for what nothing tested: a retarget at a stale moment restarts from the last sample; an
+  edit holds the selected window's new column still; a snap to another column owes no return.
+- Plants 13/13: the three invariants (a presented spring overwriting a target the layout set; an
+  edit's rebuild skipping the settle point; the settle point not reconciling the owed return);
+  leaving fullscreen not consuming the return; the clock (a spring sampling a stale `now`
+  backwards, a retarget restarting at a stale `now`, gesture deltas all at one stale moment, a
+  release springing from a stale start); and the decisions (an edit holding the old column, the
+  first view animating, a gesture beginning on a fullscreen selection, a snap keeping the return
+  owed, a removal restoring a view of a column the core does not show).
+
+- Next: cam-3 (the Roc port).
+
 **Pruning (the lead, 2026-11-26):** at a milestone, delete only what no future build reuses:
 stale `target/roc-build` keys (all but the current sources', which the build script's line
 names), plant and bisect variant builds, scratch outputs. Keep `target/debug/incremental` (it
