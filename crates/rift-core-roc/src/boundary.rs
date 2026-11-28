@@ -4213,6 +4213,93 @@ impl Drop for CamerasBox {
 }
 
 // ---------------------------------------------------------------------------------------------
+// The layout engine's switching choices.
+
+pub(crate) fn engine_switching_question(
+    question: rift_core::workspaces::SwitchQuestion<u64, u64>,
+) -> abi::BoundarySwitchQuestion {
+    use abi::BoundarySwitchQuestionTag as Tag;
+    use rift_core::workspaces::{SwitchQuestion as Q, TransferReason};
+    match question {
+        Q::Switch(a) => union!(
+            BoundarySwitchQuestion,
+            BoundarySwitchQuestionPayload.switch(abi::BoundarySwitchToQuestion {
+                shown_here: maybe_word(a.shown_here),
+                target: a.target,
+                back_and_forth: a.back_and_forth,
+            }),
+            Tag::Switch
+        ),
+        Q::Arrival(a) => union!(
+            BoundarySwitchQuestion,
+            BoundarySwitchQuestionPayload.arrival(abi::BoundaryArrivalQuestion {
+                asked_from: a.asked_from,
+                its_space: a.its_space,
+                shown_there: maybe_word(a.shown_there),
+                target: a.target,
+            }),
+            Tag::Arrival
+        ),
+        Q::Source(reason) => union!(
+            BoundarySwitchQuestion,
+            BoundarySwitchQuestionPayload.source(match reason {
+                TransferReason::Explicit => abi::BoundaryTransferReasonWire::Explicit,
+                TransferReason::DisplayArrival => abi::BoundaryTransferReasonWire::DisplayArrival,
+                TransferReason::DisplayDeparture =>
+                    abi::BoundaryTransferReasonWire::DisplayDeparture,
+                TransferReason::Restoration => abi::BoundaryTransferReasonWire::Restoration,
+            }),
+            Tag::Source
+        ),
+        Q::Moved(a) => union!(
+            BoundarySwitchQuestion,
+            BoundarySwitchQuestionPayload.moved(abi::BoundaryMovedQuestion {
+                source: a.source,
+                target: a.target,
+            }),
+            Tag::Moved
+        ),
+    }
+}
+
+pub(crate) fn engine_switching_choice(
+    choice: abi::BoundarySwitchChoice,
+) -> rift_core::workspaces::SwitchChoice<u64> {
+    use abi::BoundarySwitchChoiceTag as Tag;
+    use rift_core::workspaces::{Arrival, Moved, SourceAfter, Switch, SwitchChoice};
+    // SAFETY: each arm reads the payload its tag names.
+    match choice.tag {
+        Tag::Switch => {
+            SwitchChoice::Switch(match unsafe { *choice.borrow_payload_switch_unchecked() } {
+                abi::BoundarySwitchAnswer::Stay => Switch::Stay,
+                abi::BoundarySwitchAnswer::Back => Switch::Back,
+                abi::BoundarySwitchAnswer::Navigate => Switch::Navigate,
+            })
+        }
+        Tag::Arrival => {
+            use abi::BoundaryArrivalAnswerTag as A;
+            let arrival = unsafe { choice.borrow_payload_arrival_unchecked() };
+            SwitchChoice::Arrival(match arrival.tag {
+                A::Focus => Arrival::Focus(unsafe { *arrival.borrow_payload_focus_unchecked() }),
+                A::Activate => Arrival::Activate,
+            })
+        }
+        Tag::Source => {
+            SwitchChoice::Source(match unsafe { *choice.borrow_payload_source_unchecked() } {
+                abi::BoundarySourceAfterAnswer::Relaid => SourceAfter::Relaid,
+                abi::BoundarySourceAfterAnswer::Untouched => SourceAfter::Untouched,
+            })
+        }
+        Tag::Moved => {
+            SwitchChoice::Moved(match unsafe { *choice.borrow_payload_moved_unchecked() } {
+                abi::BoundaryMovedAnswer::Across => Moved::Across,
+                abi::BoundaryMovedAnswer::InPlace => Moved::InPlace,
+            })
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
 // The layout engine's focus choices.
 
 pub(crate) fn engine_focus_question(

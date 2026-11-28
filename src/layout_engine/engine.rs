@@ -8,7 +8,9 @@ use rift_core::focus::{
     PastTheEdge, RecordAsk, SpaceAsk, WorkspaceFocus,
 };
 use rift_core::native_memory::{Candidate, Current, Held as _, MemoryAnswer, MemoryEvent};
-use rift_core::workspaces::{Arrival, Moved, SourceAfter, Switch};
+use rift_core::workspaces::{
+    Arrival, ArrivalAsk, Moved, MovedAsk, SourceAfter, Switch, SwitchAsk, WorkspaceAsk,
+};
 use rift_protocol::{FloatingWindowSize, FloatingWindowSizePreset, ToggleWindowFloatingOptions};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
@@ -1011,6 +1013,30 @@ impl LayoutEngine {
         rust
     }
 
+    /// One of the engine's switching choices, answered in its own kind: the Rust core's answer,
+    /// and under `roc-core` the Roc core's, which decides. A Roc answer of another kind is a
+    /// difference like any other (reported; the Rust answer stands).
+    fn switching<A: WorkspaceAsk<VirtualWorkspaceId, SpaceId>>(ask: A) -> A::Answer {
+        let rust = ask.answer();
+        #[cfg(feature = "roc-core")]
+        let rust = {
+            use crate::roc_path::Word;
+            let words = ask.question().map(Word::word, Word::word);
+            let roc = rift_core_roc::workspaces::engine_switching(words);
+            crate::roc_path::decided(
+                &crate::roc_path::WORKSPACES,
+                "engine_switching",
+                &[],
+                &words,
+                rust,
+                &A::choice(rust).map(|s| Some(s.word())).expect("a word for every Space"),
+                Ok(roc),
+                |roc| roc.map(|s| Some(SpaceId::new(s))).and_then(A::of),
+            )
+        };
+        rust
+    }
+
     fn preferred_focus_for_workspace(
         &self,
         window_store: Windows<'_>,
@@ -1139,7 +1165,11 @@ impl LayoutEngine {
         let shown_here =
             self.workspaces.reading(window_store.read()).active_workspace(command_space);
         let back_and_forth = self.workspaces.settings.workspace_auto_back_and_forth;
-        match rift_core::workspaces::switch(shown_here, id, back_and_forth) {
+        match Self::switching(SwitchAsk {
+            shown_here,
+            target: id,
+            back_and_forth,
+        }) {
             Switch::Stay => EventResponse::default(),
             Switch::Back => self.switch_to_previous_workspace(window_store, context),
             Switch::Navigate => {
@@ -1176,7 +1206,13 @@ impl LayoutEngine {
         if !self.workspaces.set_active_workspace_from(window_store, command_space, id) {
             return EventResponse::default();
         }
-        match rift_core::workspaces::arrival(shown_there, id, command_space, space) {
+        let arrival = ArrivalAsk {
+            shown_there,
+            target: id,
+            asked_from: command_space,
+            its_space: space,
+        };
+        match Self::switching(arrival) {
             Arrival::Focus(space) => EventResponse {
                 workspace_space: Some(space),
                 focus_window: self.preferred_focus_for_workspace(
@@ -3854,7 +3890,7 @@ impl LayoutEngine {
             return EventResponse::default();
         }
         self.native.step(MemoryEvent::Forgotten(id));
-        match rift_core::workspaces::source_after(reason) {
+        match Self::switching(reason) {
             SourceAfter::Relaid => {
                 if let Some(source_size) = source_size {
                     self.ensure_workspace_layouts(windows, source, source_size);
@@ -3874,7 +3910,7 @@ impl LayoutEngine {
             changed: true,
             workspace_space: Some(target),
             raise_windows: members.clone(),
-            transferred_windows: match rift_core::workspaces::moved(source, target) {
+            transferred_windows: match Self::switching(MovedAsk { source, target }) {
                 Moved::InPlace => Vec::new(),
                 Moved::Across => members,
             },
@@ -5181,6 +5217,61 @@ mod tests {
         assert_ne!(focused, Some(a));
         assert!(focused == Some(b) || focused == Some(c), "{focused:?}");
         let _ = response;
+    }
+
+    /// Every kind of switching question through the engine's one door, each answer in its own
+    /// kind; under `roc-core` the Roc core answers too (a difference, or an answer of another
+    /// kind, fails here).
+    #[test]
+    fn each_switching_question_answers_in_its_own_kind() {
+        use rift_core::workspaces::{ArrivalAsk, MovedAsk, SwitchAsk};
+
+        use crate::model::virtual_workspace::WorkspaceTransferReason as Reason;
+        let mut workspaces: slotmap::SlotMap<VirtualWorkspaceId, ()> = slotmap::SlotMap::with_key();
+        let (one, two) = (workspaces.insert(()), workspaces.insert(()));
+        let (here, there) = (SpaceId::new(1), SpaceId::new(2));
+        for (shown_here, back_and_forth, expected) in [
+            (Some(one), true, Switch::Back),
+            (Some(one), false, Switch::Stay),
+            (Some(two), true, Switch::Navigate),
+            (None, false, Switch::Navigate),
+        ] {
+            let ask = SwitchAsk {
+                shown_here,
+                target: one,
+                back_and_forth,
+            };
+            assert_eq!(LayoutEngine::switching(ask), expected);
+        }
+        let arrival = |shown_there, asked_from| ArrivalAsk {
+            shown_there,
+            target: one,
+            asked_from,
+            its_space: there,
+        };
+        assert_eq!(
+            LayoutEngine::switching(arrival(Some(one), here)),
+            Arrival::Focus(there)
+        );
+        assert_eq!(
+            LayoutEngine::switching(arrival(Some(one), there)),
+            Arrival::Activate
+        );
+        assert_eq!(
+            LayoutEngine::switching(arrival(Some(two), here)),
+            Arrival::Activate
+        );
+        assert_eq!(LayoutEngine::switching(Reason::Explicit), SourceAfter::Relaid);
+        for reason in [
+            Reason::DisplayArrival,
+            Reason::DisplayDeparture,
+            Reason::Restoration,
+        ] {
+            assert_eq!(LayoutEngine::switching(reason), SourceAfter::Untouched);
+        }
+        let moved = |source, target| MovedAsk { source, target };
+        assert_eq!(LayoutEngine::switching(moved(here, there)), Moved::Across);
+        assert_eq!(LayoutEngine::switching(moved(here, here)), Moved::InPlace);
     }
 
     /// Every kind of focus question through the engine's one door, each answer in its own

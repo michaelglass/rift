@@ -220,6 +220,188 @@ pub fn moved<S: PartialEq>(source: S, target: S) -> Moved {
     }
 }
 
+/// The layout engine's switching choices, as a question (the wire form a Roc core answers):
+/// workspaces `K` and Spaces `S`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SwitchQuestion<K, S> {
+    Switch(SwitchAsk<K>),
+    Arrival(ArrivalAsk<K, S>),
+    Source(TransferReason),
+    Moved(MovedAsk<S>),
+}
+
+/// A switching choice's answer, in its wire form.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SwitchChoice<S> {
+    Switch(Switch),
+    Arrival(Arrival<S>),
+    Source(SourceAfter),
+    Moved(Moved),
+}
+
+/// The answer to `question`, from the functions above (the wire form's).
+pub fn choose_switching<K: Copy + PartialEq, S: Copy + PartialEq + std::fmt::Debug>(
+    question: SwitchQuestion<K, S>,
+) -> SwitchChoice<S> {
+    match question {
+        SwitchQuestion::Switch(ask) => SwitchChoice::Switch(WorkspaceAsk::<K, S>::answer(&ask)),
+        SwitchQuestion::Arrival(ask) => SwitchChoice::Arrival(ask.answer()),
+        SwitchQuestion::Source(reason) => {
+            SwitchChoice::Source(WorkspaceAsk::<K, S>::answer(&reason))
+        }
+        SwitchQuestion::Moved(ask) => SwitchChoice::Moved(WorkspaceAsk::<K, S>::answer(&ask)),
+    }
+}
+
+impl<K: Copy, S: Copy> SwitchQuestion<K, S> {
+    /// The question with its workspaces and Spaces renamed (a twin's words).
+    pub fn map<K2, S2>(self, k: impl Fn(K) -> K2, s: impl Fn(S) -> S2) -> SwitchQuestion<K2, S2> {
+        match self {
+            SwitchQuestion::Switch(a) => SwitchQuestion::Switch(SwitchAsk {
+                shown_here: a.shown_here.map(&k),
+                target: k(a.target),
+                back_and_forth: a.back_and_forth,
+            }),
+            SwitchQuestion::Arrival(a) => SwitchQuestion::Arrival(ArrivalAsk {
+                shown_there: a.shown_there.map(&k),
+                target: k(a.target),
+                asked_from: s(a.asked_from),
+                its_space: s(a.its_space),
+            }),
+            SwitchQuestion::Source(reason) => SwitchQuestion::Source(reason),
+            SwitchQuestion::Moved(a) => SwitchQuestion::Moved(MovedAsk {
+                source: s(a.source),
+                target: s(a.target),
+            }),
+        }
+    }
+}
+
+impl<S: Copy> SwitchChoice<S> {
+    /// The answer with its Spaces renamed; none where a word names nothing.
+    pub fn map<S2>(self, s: impl Fn(S) -> Option<S2>) -> Option<SwitchChoice<S2>> {
+        Some(match self {
+            SwitchChoice::Switch(switch) => SwitchChoice::Switch(switch),
+            SwitchChoice::Arrival(Arrival::Focus(space)) => {
+                SwitchChoice::Arrival(Arrival::Focus(s(space)?))
+            }
+            SwitchChoice::Arrival(Arrival::Activate) => SwitchChoice::Arrival(Arrival::Activate),
+            SwitchChoice::Source(source) => SwitchChoice::Source(source),
+            SwitchChoice::Moved(moved) => SwitchChoice::Moved(moved),
+        })
+    }
+}
+
+/// One kind of switching question with its own answer: callers see `Answer`, never a
+/// [`SwitchChoice`]; `of` is where a choice of another kind is caught (none: a twin's bug).
+pub trait WorkspaceAsk<K, S> {
+    type Answer: Copy + PartialEq + std::fmt::Debug;
+    /// The Rust core's answer.
+    fn answer(&self) -> Self::Answer;
+    /// The question in its wire form.
+    fn question(self) -> SwitchQuestion<K, S>;
+    /// An answer in its wire form.
+    fn choice(answer: Self::Answer) -> SwitchChoice<S>;
+    /// A wire answer as this kind's answer; none for a choice of another kind.
+    fn of(choice: SwitchChoice<S>) -> Option<Self::Answer>;
+}
+
+/// [`switch`]'s facts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SwitchAsk<K> {
+    pub shown_here: Option<K>,
+    pub target: K,
+    pub back_and_forth: bool,
+}
+
+/// [`arrival`]'s facts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArrivalAsk<K, S> {
+    pub shown_there: Option<K>,
+    pub target: K,
+    pub asked_from: S,
+    pub its_space: S,
+}
+
+/// [`moved`]'s facts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MovedAsk<S> {
+    pub source: S,
+    pub target: S,
+}
+
+impl<K: Copy + PartialEq, S> WorkspaceAsk<K, S> for SwitchAsk<K> {
+    type Answer = Switch;
+
+    fn answer(&self) -> Switch { switch(self.shown_here, self.target, self.back_and_forth) }
+
+    fn question(self) -> SwitchQuestion<K, S> { SwitchQuestion::Switch(self) }
+
+    fn choice(answer: Switch) -> SwitchChoice<S> { SwitchChoice::Switch(answer) }
+
+    fn of(choice: SwitchChoice<S>) -> Option<Switch> {
+        match choice {
+            SwitchChoice::Switch(switch) => Some(switch),
+            SwitchChoice::Arrival(_) | SwitchChoice::Source(_) | SwitchChoice::Moved(_) => None,
+        }
+    }
+}
+
+impl<K: Copy + PartialEq, S: Copy + PartialEq + std::fmt::Debug> WorkspaceAsk<K, S>
+    for ArrivalAsk<K, S>
+{
+    type Answer = Arrival<S>;
+
+    fn answer(&self) -> Arrival<S> {
+        arrival(self.shown_there, self.target, self.asked_from, self.its_space)
+    }
+
+    fn question(self) -> SwitchQuestion<K, S> { SwitchQuestion::Arrival(self) }
+
+    fn choice(answer: Arrival<S>) -> SwitchChoice<S> { SwitchChoice::Arrival(answer) }
+
+    fn of(choice: SwitchChoice<S>) -> Option<Arrival<S>> {
+        match choice {
+            SwitchChoice::Arrival(arrival) => Some(arrival),
+            SwitchChoice::Switch(_) | SwitchChoice::Source(_) | SwitchChoice::Moved(_) => None,
+        }
+    }
+}
+
+impl<K, S> WorkspaceAsk<K, S> for TransferReason {
+    type Answer = SourceAfter;
+
+    fn answer(&self) -> SourceAfter { source_after(*self) }
+
+    fn question(self) -> SwitchQuestion<K, S> { SwitchQuestion::Source(self) }
+
+    fn choice(answer: SourceAfter) -> SwitchChoice<S> { SwitchChoice::Source(answer) }
+
+    fn of(choice: SwitchChoice<S>) -> Option<SourceAfter> {
+        match choice {
+            SwitchChoice::Source(source) => Some(source),
+            SwitchChoice::Switch(_) | SwitchChoice::Arrival(_) | SwitchChoice::Moved(_) => None,
+        }
+    }
+}
+
+impl<K, S: PartialEq + Copy> WorkspaceAsk<K, S> for MovedAsk<S> {
+    type Answer = Moved;
+
+    fn answer(&self) -> Moved { moved(self.source, self.target) }
+
+    fn question(self) -> SwitchQuestion<K, S> { SwitchQuestion::Moved(self) }
+
+    fn choice(answer: Moved) -> SwitchChoice<S> { SwitchChoice::Moved(answer) }
+
+    fn of(choice: SwitchChoice<S>) -> Option<Moved> {
+        match choice {
+            SwitchChoice::Moved(moved) => Some(moved),
+            SwitchChoice::Switch(_) | SwitchChoice::Arrival(_) | SwitchChoice::Source(_) => None,
+        }
+    }
+}
+
 /// Whether window discovery emits a window it found on a Space: unless the window is assigned
 /// to a workspace and the Space's active workspace (asked only then) is another one. A window
 /// with no assignment, or a Space with no active workspace, is emitted.
@@ -809,6 +991,26 @@ pub mod plain {
 
 #[cfg(test)]
 mod tests {
+    /// Every kind reads only a choice of its own kind: any other is none (a twin's bug).
+    #[test]
+    fn a_switching_choice_of_another_kind_reads_as_nothing() {
+        type C = SwitchChoice<u32>;
+        let all = [
+            C::Switch(Switch::Back),
+            C::Arrival(Arrival::Focus(1)),
+            C::Source(SourceAfter::Relaid),
+            C::Moved(Moved::Across),
+        ];
+        fn reads<A: WorkspaceAsk<u32, u32>>(choices: &[C]) -> Vec<bool> {
+            choices.iter().map(|&c| A::of(c).is_some()).collect()
+        }
+        let only = |i: usize| (0..4).map(|j| j == i).collect::<Vec<_>>();
+        assert_eq!(reads::<SwitchAsk<u32>>(&all), only(0));
+        assert_eq!(reads::<ArrivalAsk<u32, u32>>(&all), only(1));
+        assert_eq!(reads::<TransferReason>(&all), only(2));
+        assert_eq!(reads::<MovedAsk<u32>>(&all), only(3));
+    }
+
     #[test]
     fn switching_to_the_shown_workspace_goes_back_only_with_back_and_forth() {
         assert_eq!(switch(Some(1), 1, true), Switch::Back);

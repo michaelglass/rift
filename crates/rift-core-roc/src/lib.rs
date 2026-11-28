@@ -2521,6 +2521,16 @@ pub mod workspaces {
 
     use crate::{abi, boundary, host};
 
+    /// One of the layout engine's switching choices (`rift_core::workspaces::choose_switching`):
+    /// every fact is in the question, so it is always decided.
+    pub fn engine_switching(
+        question: rift_core::workspaces::SwitchQuestion<u64, u64>,
+    ) -> rift_core::workspaces::SwitchChoice<u64> {
+        let question = boundary::engine_switching_question(question);
+        // SAFETY: the question is plain data handed to Roc; the choice is plain data.
+        boundary::engine_switching_choice(unsafe { abi::roc_engine_switching(question) })
+    }
+
     /// What each event of a run met, and the joined workspaces it leaves: catalog,
     /// activations, owners, and each catalogued workspace's assigned windows in catalog order.
     #[derive(Debug, Clone, PartialEq)]

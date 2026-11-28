@@ -446,3 +446,54 @@ fn the_roc_workspaces_keep_the_joined_workspaces_between_events_as_the_rust_ones
         "workspaces: {steps} kept-joined steps identical ({refused} refused, {handed} removals with owners), views compared after each"
     );
 }
+
+/// The layout engine's switching choices (`rift_core::workspaces::choose_switching`): every kind
+/// of question, drawn at random, with a few workspaces and Spaces so the shown workspace is the
+/// target about half the time and the asking Space is the workspace's own about as often.
+#[test]
+fn the_roc_core_makes_the_engines_switching_choices_as_the_rust_core_does() {
+    use rift_core::workspaces::{
+        ArrivalAsk, MovedAsk, SwitchAsk, SwitchQuestion as Q, TransferReason, choose_switching,
+    };
+    let mut rng = Rng(0x5717_C4E5_0E1B);
+    let runs: u64 =
+        std::env::var("RIFT_ENGINE_SWITCHING_CASES").map_or(20_000, |n| n.parse().unwrap());
+    for case in 0..runs {
+        let mut word = |n: u64| 1 + rng.below(n);
+        let question: Q<u64, u64> = match word(4) {
+            1 => {
+                let shown = word(3);
+                Q::Switch(SwitchAsk {
+                    shown_here: (shown < 3).then_some(shown),
+                    target: word(2),
+                    back_and_forth: word(2) == 1,
+                })
+            }
+            2 => {
+                let shown = word(3);
+                Q::Arrival(ArrivalAsk {
+                    shown_there: (shown < 3).then_some(shown),
+                    target: word(2),
+                    asked_from: 10 + word(2),
+                    its_space: 10 + word(2),
+                })
+            }
+            3 => Q::Source(
+                [
+                    TransferReason::Explicit,
+                    TransferReason::DisplayArrival,
+                    TransferReason::DisplayDeparture,
+                    TransferReason::Restoration,
+                ][word(4) as usize - 1],
+            ),
+            _ => Q::Moved(MovedAsk {
+                source: word(2),
+                target: word(2),
+            }),
+        };
+        let rust = choose_switching(question);
+        let roc = rift_core_roc::workspaces::engine_switching(question);
+        assert_eq!(roc, rust, "case {case}: {question:?}");
+    }
+    eprintln!("engine switching: {runs} questions answered alike");
+}

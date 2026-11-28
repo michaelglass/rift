@@ -1236,10 +1236,24 @@ workspace over it.
 - One line: "A fresh Space shows workspace 1, not `default_workspace`, when
   `ensure_active_workspace_info` is what initialises it."
 - Test: `a_fresh_space_shows_the_default_workspace` (engine tests).
-- Fix: the commit "engine: a fresh Space shows default_workspace" on `rearch/roc-next`. Upstream's
+- Fix: `89287d25` on `rearch/roc-next` ("engine: a fresh Space shows default_workspace"). Upstream's
   form: initialise, then return the active workspace, with no second activation.
 
-- Next: E1b-2 (the switching choices in Roc).
+**E1b-2 (2026-11-28): the switching choices decide in Roc**, in the E1a-3 shape. Each kind
+implements `rift_core::workspaces::WorkspaceAsk` with its own `Answer`: `SwitchAsk` (`Switch`),
+`ArrivalAsk` (`Arrival<S>`), `TransferReason` (`SourceAfter`), `MovedAsk` (`Moved`). The wire
+form (`SwitchQuestion`, `SwitchChoice`) sits behind one Roc entry (`roc_engine_switching`,
+`roc/core/EngineWorkspaces.roc`), and `WorkspaceAsk::of` reads only a choice of its own kind. The
+engine's door is one generic `LayoutEngine::switching`, deciding through `roc_path::decided`
+(family `WORKSPACES`).
+- Differential (`rift-core-roc/tests/workspaces.rs`): 20 000 random questions of every kind;
+  check-fast cuts it to 2000.
+- Tests: every kind reads only its own kind of choice (rift-core); every kind through the engine's
+  door, Roc answering under `roc-core`.
+- Plants 9/9: six on the Roc choices, a Moved question answered with a Source from Roc (engine), a
+  Source ask reading a Moved choice, a Roc arrival's Space read back as another.
+
+- Next: E1c (placement and relocation), its plan a sum type per outcome kind.
 
 **Pruning (the lead, 2026-11-26):** at a milestone, delete only what no future build reuses:
 stale `target/roc-build` keys (all but the current sources', which the build script's line

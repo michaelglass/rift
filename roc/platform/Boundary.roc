@@ -1021,6 +1021,31 @@ Boundary := [].{
 
 	NativeBatchView := [Idle, Collecting(List(U64))]
 
+	# The layout engine's switching choices (`rift_core::workspaces::choose_switching`):
+	# workspaces and Spaces are one word each.
+
+	SwitchToQuestion := { shown_here : MaybeWord, target : U64, back_and_forth : Bool }
+
+	ArrivalQuestion := { shown_there : MaybeWord, target : U64, asked_from : U64, its_space : U64 }
+
+	TransferReasonWire := [Explicit, DisplayArrival, DisplayDeparture, Restoration]
+
+	MovedQuestion := { source : U64, target : U64 }
+
+	## One of the layout engine's switching choices.
+	SwitchQuestion := [Switch(SwitchToQuestion), Arrival(ArrivalQuestion), Source(TransferReasonWire), Moved(MovedQuestion)]
+
+	SwitchAnswer := [Stay, Back, Navigate]
+
+	ArrivalAnswer := [Focus(U64), Activate]
+
+	SourceAfterAnswer := [Relaid, Untouched]
+
+	MovedAnswer := [Across, InPlace]
+
+	## A switching choice's answer.
+	SwitchChoice := [Switch(SwitchAnswer), Arrival(ArrivalAnswer), Source(SourceAfterAnswer), Moved(MovedAnswer)]
+
 	# The layout engine's focus choices (`rift_core::focus::choose`), questions on plain data:
 	# windows and Spaces are one word each.
 
