@@ -5707,11 +5707,9 @@ impl Reactor {
         let crate::model::app_rules::AppRuleOutcome { frame, workspace_focus } =
             layout_outcome.app_rules;
         let (placements, resizes) = match frame {
-            Some(crate::model::app_rules::AppRuleFrame::Place(placement)) => {
-                (vec![placement], vec![])
-            }
-            Some(crate::model::app_rules::AppRuleFrame::Resize(resize)) => (vec![], vec![resize]),
-            None => (vec![], vec![]),
+            rift_core::placement::RuleFrame::Place(placement) => (vec![placement], vec![]),
+            rift_core::placement::RuleFrame::Resize(resize) => (vec![], vec![resize]),
+            rift_core::placement::RuleFrame::Keep => (vec![], vec![]),
         };
         self.apply_app_rule_placements(placements);
         self.apply_app_rule_resizes(resizes);

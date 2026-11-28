@@ -236,9 +236,95 @@ where
     }
 }
 
+/// The size a floating window is asked to take.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Sizing {
+    /// Its size now.
+    Keep,
+    Dimensions {
+        w: f64,
+        h: f64,
+    },
+    /// A share of the screen (`SMART_WIDTH`, `SMART_HEIGHT`).
+    Smart,
+}
+
+/// Whether a floating window is centred on the screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Centering {
+    Center,
+    /// Its position now.
+    Keep,
+}
+
+/// A smart-sized floating window's share of the screen's width.
+pub const SMART_WIDTH: f64 = 0.8;
+/// A smart-sized floating window's share of the screen's height.
+pub const SMART_HEIGHT: f64 = 0.93;
+
+/// The frame a floating window is asked to take: `frame` sized by `sizing`, then centred on
+/// `screen` if asked.
+pub fn requested_frame(
+    frame: crate::plain::Rect,
+    screen: crate::plain::Rect,
+    centering: Centering,
+    sizing: Sizing,
+) -> crate::plain::Rect {
+    let (w, h) = match sizing {
+        Sizing::Keep => (frame.w, frame.h),
+        Sizing::Dimensions { w, h } => (w, h),
+        Sizing::Smart => (screen.w * SMART_WIDTH, screen.h * SMART_HEIGHT),
+    };
+    let (x, y) = match centering {
+        Centering::Keep => (frame.x, frame.y),
+        Centering::Center => (
+            screen.x + screen.w / 2.0 - w / 2.0,
+            screen.y + screen.h / 2.0 - h / 2.0,
+        ),
+    };
+    crate::plain::Rect { x, y, w, h }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_requested_frame_takes_its_size_then_centres_on_the_screen() {
+        use crate::plain::Rect;
+        let frame = Rect {
+            x: 10.0,
+            y: 20.0,
+            w: 300.0,
+            h: 200.0,
+        };
+        let screen = Rect {
+            x: 1000.0,
+            y: 0.0,
+            w: 1000.0,
+            h: 800.0,
+        };
+        let r = |c, s| super::requested_frame(frame, screen, c, s);
+        assert_eq!(r(super::Centering::Keep, super::Sizing::Keep), frame);
+        assert_eq!(
+            r(super::Centering::Keep, super::Sizing::Dimensions {
+                w: 500.0,
+                h: 400.0
+            }),
+            Rect { w: 500.0, h: 400.0, ..frame }
+        );
+        assert_eq!(r(super::Centering::Center, super::Sizing::Keep), Rect {
+            x: 1350.0,
+            y: 300.0,
+            ..frame
+        });
+        assert_eq!(r(super::Centering::Center, super::Sizing::Smart), Rect {
+            x: 1100.0,
+            y: 28.0,
+            w: 800.0,
+            h: 744.0
+        });
+    }
     use crate::plain::{Rect, WindowId};
 
     type Machine = Floats<WindowId, u64, Rect>;

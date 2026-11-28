@@ -101,15 +101,12 @@ pub enum AppRuleRejection {
 /// Frame and workspace requests from observing a single window.
 #[derive(Debug, Default)]
 pub(crate) struct AppRuleOutcome {
-    pub(crate) frame: Option<AppRuleFrame>,
+    pub(crate) frame: AppRuleFrame,
     pub(crate) workspace_focus: Option<AppRuleWorkspaceFocus>,
 }
 
-#[derive(Debug)]
-pub(crate) enum AppRuleFrame {
-    Place(AppRulePlacement),
-    Resize(AppRuleResize),
-}
+/// An app rule's frame request: the core's, over the placement and resize it carries.
+pub(crate) type AppRuleFrame = rift_core::placement::RuleFrame<AppRulePlacement, AppRuleResize>;
 
 /// One-shot frame request derived from a floating app rule.
 #[derive(Debug, Clone, Copy, PartialEq)]

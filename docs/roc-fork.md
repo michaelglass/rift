@@ -1313,7 +1313,38 @@ afterwards }}`.
 - Plants 23/23 (twelve on the core, eleven on the engine; seven engine plants survived until those
   tests existed; the resume plant needed the one case where the window is not re-added).
 
-- Next: E1c-3 (placement, the moves, assignment, the rule outcome).
+**E1c-3 (2026-11-28): placement, the moves, assignment and the rule outcome are core
+functions**, in `rift_core::placement` (the frame request in `rift_core::floats`):
+- `addition` (`add_window_to_layout`) over `AdditionFacts` → `Addition::{Skip(Skipped::{Unadmitted,
+  FullscreenSuspended, Unassigned}), Float { workspace }, Tile { workspace, insert },
+  IntoFloatingLayout { workspace, insert }}`, `Insert<L, Wd>::{Present, Add { layout, width },
+  NoLayout}` (`IntoFloatingLayout` carries no width: a floating layout is never scrolling). The
+  engine carries an addition out through `join_workspace` (participation, the projected Space before
+  and after) with the insertion as a closure, so no arm names a variant it cannot get.
+- `window_move` → `WindowMove::{Refused(NotAMember | NoWorkspace), Move { from, to }}`; `landing` →
+  `Landing::{Hidden, Focused}`.
+- `workspace_move` → `WorkspaceMove::{Refused(Nothing | SameSpace | NoIndex), Members { from, index
+  }, Transfer(K)}`; after the destination is initialised (an effect between two pure steps),
+  `members_destination` → `NoDestination` or the workspace; `moved_focus` →
+  `MovedFocus::{Preferred, First, Nothing}`. The per-display branch is the engine's
+  `move_workspace_members`.
+- `claim` → `Claim::{Claimed { manage: Manage::{ByRule, Override} }, Free}`; after the persistence
+  observation (an effect), `assignment` → `{ rule_workspace: Kept | DroppedByRestore, native:
+  Forgotten | Kept }`.
+- `rule_float` → `RuleFloat::{Float, Unfloat, Keep}`; `rule_frame` → `RuleFrame::{Place, Resize,
+  Keep}`, now the type of `AppRuleOutcome.frame` (`AppRuleFrame` is an alias; the reactor matches
+  `Keep` instead of `None`).
+- `floats::requested_frame` (`requested_floating_frame`) over `Sizing::{Keep, Dimensions, Smart}`
+  and `Centering::{Center, Keep}`; the smart ratios moved with it.
+- Tests: every case in rift-core; in the engine, an added window's facts (the floating set, not the
+  projection; the tree holding it), a floating window joining a floating layout leaving the floats,
+  a per-display workspace move focusing a moved member (its own focus, or the first moved when the
+  member is minimized), a claimed window recording its rule's override, a restore dropping the
+  rule's workspace (`apply_rule_workspace`, a function so the plan's edit is tested directly), a
+  rule unfloating a window, a floating toggle's centring and smart size.
+- Plants 27/27 (fifteen core, twelve engine; nine engine plants survived until those tests existed).
+
+- Next: E1c-4 (one Roc entry for E1c, typed per kind).
 
 **Pruning (the lead, 2026-11-26):** at a milestone, delete only what no future build reuses:
 stale `target/roc-build` keys (all but the current sources', which the build script's line

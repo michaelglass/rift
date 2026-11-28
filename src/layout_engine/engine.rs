@@ -9,8 +9,10 @@ use rift_core::focus::{
 };
 use rift_core::native_memory::{Candidate, Current, Held as _, MemoryAnswer, MemoryEvent};
 use rift_core::placement::{
-    Across, Afterwards, Arrangement, Assign, DropEdit, DropFacts, DropPlan, DropTarget, Edited,
-    Family, Kept, Laid, Observed, Override, Placed, Projection, Relocation, RelocationFacts, Width,
+    Across, Addition, AdditionFacts, Afterwards, Arrangement, Assign, Claim, DropEdit, DropFacts,
+    DropPlan, DropTarget, Edited, Family, Insert, Kept, Laid, Landing, Manage, MovedFocus,
+    NativeLayout, Observed, Override, Placed, Projection, Relocation, RelocationFacts, RuleFloat,
+    RuleWorkspace, Tree, Width, WindowMove, WorkspaceMove,
 };
 use rift_core::workspaces::{
     Arrival, ArrivalAsk, Moved, MovedAsk, SourceAfter, Switch, SwitchAsk, WorkspaceAsk,
@@ -30,7 +32,7 @@ use crate::layout_engine::systems::{
     Focus, GroupEdit, LayoutEdit, WindowChange, WindowLayoutConstraints, WindowQuery,
 };
 use crate::layout_engine::{LayoutSystem, cg_rect, core_rect};
-use crate::model::app_rules::{AppRuleFrame, AppRuleOutcome, AppRuleResize, AppRuleWorkspaceFocus};
+use crate::model::app_rules::{AppRuleOutcome, AppRuleResize, AppRuleWorkspaceFocus};
 use crate::model::virtual_workspace::{VirtualWorkspaceId, WorkspaceContext, WorkspaceStore};
 use crate::model::window_store::{Windows, WindowsMut};
 use crate::model::{
@@ -43,9 +45,6 @@ mod persistence;
 use persistence::PersistenceState;
 pub use persistence::{RestoreReport, RestoreRequest, RestoreScope, RestoreSource};
 pub use rift_protocol::LayoutCommand;
-
-const SMART_FLOATING_WIDTH_RATIO: f64 = 0.8;
-const SMART_FLOATING_HEIGHT_RATIO: f64 = 0.93;
 
 #[derive(Clone, Copy)]
 pub(crate) struct DropPreview {
@@ -63,28 +62,43 @@ impl DropPreview {
     }
 }
 
+/// A rule decision as the assignment plan leaves it: a restore drops the rule's workspace.
+fn apply_rule_workspace(
+    rule_workspace: RuleWorkspace,
+    decision: &mut Option<crate::model::app_rules::AppRuleDecision>,
+) {
+    match (rule_workspace, decision) {
+        (RuleWorkspace::DroppedByRestore, Some(decision)) => decision.workspace = None,
+        (RuleWorkspace::DroppedByRestore, None) | (RuleWorkspace::Kept, _) => {}
+    }
+}
+
+/// The frame a floating toggle asks for: the floats core's, from the options as the config says.
 fn requested_floating_frame(
-    mut frame: CGRect,
+    frame: CGRect,
     screen: CGRect,
     center: bool,
     size: Option<FloatingWindowSize>,
 ) -> CGRect {
-    if let Some(size) = size {
-        frame.size = match size {
-            FloatingWindowSize::Dimensions { w, h } => CGSize::new(w.get(), h.get()),
-            FloatingWindowSize::Preset(FloatingWindowSizePreset::Smart) => CGSize::new(
-                screen.size.width * SMART_FLOATING_WIDTH_RATIO,
-                screen.size.height * SMART_FLOATING_HEIGHT_RATIO,
-            ),
-        };
-    }
-    if center {
-        frame.origin = CGPoint::new(
-            screen.mid().x - frame.size.width / 2.0,
-            screen.mid().y - frame.size.height / 2.0,
-        );
-    }
-    frame
+    use rift_core::floats::{Centering, Sizing};
+    let sizing = match size {
+        None => Sizing::Keep,
+        Some(FloatingWindowSize::Dimensions { w, h }) => {
+            Sizing::Dimensions { w: w.get(), h: h.get() }
+        }
+        Some(FloatingWindowSize::Preset(FloatingWindowSizePreset::Smart)) => Sizing::Smart,
+    };
+    let centering = if center {
+        Centering::Center
+    } else {
+        Centering::Keep
+    };
+    cg_rect(rift_core::floats::requested_frame(
+        core_rect(frame),
+        core_rect(screen),
+        centering,
+        sizing,
+    ))
 }
 
 #[derive(Debug, Clone)]
@@ -1760,65 +1774,94 @@ impl LayoutEngine {
         active_space
     }
 
+    /// What adding `wid`, observed on `space`, is decided from.
+    fn addition_facts(
+        &self,
+        window_store: Windows<'_>,
+        space: SpaceId,
+        wid: WindowId,
+    ) -> AdditionFacts<VirtualWorkspaceId, LayoutId> {
+        let reading = self.workspaces.reading(window_store);
+        let workspace = reading.workspace_for_window(space, wid);
+        AdditionFacts {
+            admitted: window_store.is_admitted(wid),
+            fullscreen_suspended: window_store.is_window_native_fullscreen_suspended(wid),
+            workspace: workspace.and_then(|id| Some((id, self.family(id)?))),
+            in_floats: self.floats.is_floating(wid),
+            tree: workspace.and_then(|id| {
+                let layout = reading.active_layout(space, id)?;
+                let holds_window = self.workspaces[id].layout_system.contains_window(layout, wid);
+                Some(Tree { layout, holds_window })
+            }),
+            preserve_widths: self.layout_settings.scrolling.preserve_window_sizes,
+        }
+    }
+
     fn add_window_to_layout(
         &mut self,
         window_store: Windows<'_>,
         space: SpaceId,
         wid: WindowId,
     ) -> bool {
-        if !window_store.is_admitted(wid) || window_store.is_window_native_fullscreen_suspended(wid)
-        {
-            return false;
+        let addition =
+            rift_core::placement::addition(self.addition_facts(window_store, space, wid));
+        match addition {
+            Addition::Skip(_) => false,
+            Addition::Float { workspace } => {
+                self.join_workspace(window_store, workspace, wid, |_| {})
+            }
+            Addition::Tile { workspace, insert } => {
+                self.join_workspace(window_store, workspace, wid, |engine| {
+                    engine.insert_added(window_store, space, workspace, wid, insert);
+                })
+            }
+            Addition::IntoFloatingLayout { workspace, insert } => {
+                self.join_workspace(window_store, workspace, wid, |engine| {
+                    engine.floats.remove_floating(wid);
+                    let insert = insert.with_width(|()| Width::AsIs);
+                    engine.insert_added(window_store, space, workspace, wid, insert);
+                })
+            }
         }
-        let Some(assigned_workspace) =
-            self.workspaces.reading(window_store).workspace_for_window(space, wid)
-        else {
-            return false;
-        };
+    }
 
-        let active_space_before = self.projected_space_in(window_store, assigned_workspace, wid);
-        let mut inserted = false;
+    /// An added window takes part in its workspace's layout (`insert` puts it in the tree):
+    /// whether that changed it (it resumed, or its projected Space moved).
+    fn join_workspace(
+        &mut self,
+        window_store: Windows<'_>,
+        workspace: VirtualWorkspaceId,
+        wid: WindowId,
+        insert: impl FnOnce(&mut Self),
+    ) -> bool {
+        let active_space_before = self.projected_space_in(window_store, workspace, wid);
+        let resumed = self.workspaces[workspace].layout_system.set_window_participation(wid, true);
+        insert(self);
+        resumed || self.projected_space_in(window_store, workspace, wid) != active_space_before
+    }
 
-        if matches!(
-            self.workspaces[assigned_workspace].layout_system,
-            LayoutSystemKind::Floating(_)
-        ) {
-            self.floats.remove_floating(wid);
-        }
-        let should_be_floating = self.floats.is_floating(wid);
-        let resumed = self.workspaces[assigned_workspace]
-            .layout_system
-            .set_window_participation(wid, true);
-
-        if should_be_floating {
-        } else if let Some(layout) =
-            self.workspaces.reading(window_store).active_layout(space, assigned_workspace)
-        {
-            if !self.workspaces[assigned_workspace].layout_system.contains_window(layout, wid) {
-                if matches!(
-                    self.workspaces[assigned_workspace].layout_system,
-                    LayoutSystemKind::Scrolling(_)
-                ) && self.layout_settings.scrolling.preserve_window_sizes
-                {
-                    self.preserve_scrolling_window_width(window_store, wid);
-                }
-                self.workspaces[assigned_workspace]
+    fn insert_added(
+        &mut self,
+        window_store: Windows<'_>,
+        space: SpaceId,
+        workspace: VirtualWorkspaceId,
+        wid: WindowId,
+        insert: Insert<LayoutId, Width>,
+    ) {
+        match insert {
+            Insert::Present => {}
+            Insert::Add { layout, width } => {
+                self.keep_width(window_store, wid, width);
+                self.workspaces[workspace]
                     .layout_system
                     .update(WindowChange::Add(layout, wid, None));
-                inserted = true;
+                self.restore_native_layout(window_store, workspace, Some(wid));
             }
-        } else {
-            warn!(
+            Insert::NoLayout => warn!(
                 "No active layout for workspace {:?} on space {:?}; window {:?} not added to tree",
-                assigned_workspace, space, wid
-            );
+                workspace, space, wid
+            ),
         }
-
-        if inserted {
-            self.restore_native_layout(window_store, assigned_workspace, Some(wid));
-        }
-        resumed
-            || self.projected_space_in(window_store, assigned_workspace, wid) != active_space_before
     }
 
     fn preserve_scrolling_window_width(&mut self, window_store: Windows<'_>, wid: WindowId) {
@@ -2015,17 +2058,15 @@ impl LayoutEngine {
         effects: AppRuleEffects,
         app_rule_outcome: &mut AppRuleOutcome,
     ) -> Option<(WindowId, VirtualWorkspaceId)> {
-        let should_float = effects.should_float(was_floating);
-        if should_float {
-            self.floats.add_floating(window);
-        } else if was_floating {
-            self.floats.remove_floating(window);
+        match rift_core::placement::rule_float(effects.should_float(was_floating), was_floating) {
+            RuleFloat::Float => self.floats.add_floating(window),
+            RuleFloat::Unfloat => self.floats.remove_floating(window),
+            RuleFloat::Keep => {}
         }
-
-        app_rule_outcome.frame =
-            effects.floating_placement(window, space).map(AppRuleFrame::Place).or_else(|| {
-                effects.tiled_resize(window, space, was_floating).map(AppRuleFrame::Resize)
-            });
+        app_rule_outcome.frame = rift_core::placement::rule_frame(
+            effects.floating_placement(window, space),
+            effects.tiled_resize(window, space, was_floating),
+        );
 
         effects.focus.then_some((window, effects.workspace_id))
     }
@@ -3712,12 +3753,17 @@ impl LayoutEngine {
                     .and_then(crate::sys::window_server::window_tags)
             })
         };
-        if window_store.read().is_claimed(window_id) {
-            window_store.set_manage_override(
-                window_id,
-                decision.as_ref().and_then(|rule| rule.management_override()),
-            );
-            return Ok(None);
+        let management = decision.as_ref().and_then(|rule| rule.management_override());
+        match rift_core::placement::claim(window_store.read().is_claimed(window_id), management) {
+            Claim::Claimed { manage } => {
+                let manage_override = match manage {
+                    Manage::ByRule => None,
+                    Manage::Override(manage) => Some(manage),
+                };
+                window_store.set_manage_override(window_id, manage_override);
+                return Ok(None);
+            }
+            Claim::Free => {}
         }
         let workspace_context = workspace_context.into();
         let space = workspace_context.space;
@@ -3741,13 +3787,16 @@ impl LayoutEngine {
         // A persistence match is an explicit restoration of the user's previous
         // workspace. App rules still control admission and other effects, but
         // their default placement must not relocate the window during restore.
-        if restored && let Some(decision) = &mut decision {
-            decision.workspace = None;
-        }
-        if reapply_workspace_rule
-            && decision.as_ref().is_some_and(|decision| decision.workspace.is_some())
-        {
-            self.forget_native_layout_for_window(window_store.read(), window_id);
+        let names_workspace =
+            decision.as_ref().is_some_and(|decision| decision.workspace.is_some());
+        let plan =
+            rift_core::placement::assignment(restored, reapply_workspace_rule, names_workspace);
+        apply_rule_workspace(plan.rule_workspace, &mut decision);
+        match plan.native {
+            NativeLayout::Forgotten => {
+                self.forget_native_layout_for_window(window_store.read(), window_id);
+            }
+            NativeLayout::Kept => {}
         }
         self.workspaces
             .apply_app_rule_decision(
@@ -3779,23 +3828,16 @@ impl LayoutEngine {
         target_screen_size: CGSize,
         window_id: WindowId,
     ) -> EventResponse {
-        let Some(source_workspace_id) = self
-            .workspaces
-            .reading(window_store.read())
-            .workspace_for_window(source_space, window_id)
-        else {
-            return EventResponse::default();
-        };
-
-        let Some(target_workspace_id) =
-            self.workspaces.reading(window_store.read()).active_workspace(target_space)
-        else {
-            debug!(
-                ?window_id,
-                ?target_space,
-                "Window move ignored: destination has no workspace"
-            );
-            return EventResponse::default();
+        let reading = self.workspaces.reading(window_store.read());
+        let (source_workspace_id, target_workspace_id) = match rift_core::placement::window_move(
+            reading.workspace_for_window(source_space, window_id),
+            reading.active_workspace(target_space),
+        ) {
+            WindowMove::Refused(reason) => {
+                debug!(?window_id, ?target_space, ?reason, "Window move refused");
+                return EventResponse::default();
+            }
+            WindowMove::Move { from, to } => (from, to),
         };
 
         self.ensure_workspace_layouts(window_store, target_space, target_screen_size);
@@ -3809,11 +3851,14 @@ impl LayoutEngine {
             return EventResponse::default();
         }
 
-        if !window_store.read().can_place_window(window_id) {
-            return EventResponse {
-                changed: true,
-                ..EventResponse::default()
-            };
+        match rift_core::placement::landing(window_store.read().can_place_window(window_id)) {
+            Landing::Hidden => {
+                return EventResponse {
+                    changed: true,
+                    ..EventResponse::default()
+                };
+            }
+            Landing::Focused => {}
         }
         self.workspaces.set_last_focused_window(
             &window_store.core,
@@ -3840,59 +3885,28 @@ impl LayoutEngine {
         target_space: SpaceId,
         target_screen_size: CGSize,
     ) -> EventResponse {
-        let Some(id) = self.workspaces.reading(window_store.read()).active_workspace(source_space)
-        else {
-            return EventResponse::default();
-        };
-        if self.workspaces.effective_mode() == crate::common::config::WorkspaceMode::PerDisplay {
-            if source_space == target_space {
+        let reading = self.workspaces.reading(window_store.read());
+        let plan = rift_core::placement::workspace_move(
+            reading.active_workspace(source_space),
+            self.workspaces.effective_mode() == crate::common::config::WorkspaceMode::PerDisplay,
+            source_space == target_space,
+            reading.active_workspace_idx(source_space).map(|index| index as usize),
+        );
+        let id = match plan {
+            WorkspaceMove::Refused(reason) => {
+                debug!(?source_space, ?target_space, ?reason, "Workspace move refused");
                 return EventResponse::default();
             }
-            let Some(index) =
-                self.workspaces.reading(window_store.read()).active_workspace_idx(source_space)
-            else {
-                return EventResponse::default();
-            };
-            // Moving onto a Space initialises it, as placing a window there does.
-            self.workspaces.ensure_space_initialized(window_store, target_space);
-            let Some(destination) = self
-                .workspaces
-                .reading(window_store.read())
-                .workspace_id_at(target_space, Some(index as usize))
-            else {
-                return EventResponse::default();
-            };
-            let focus =
-                self.preferred_focus_for_workspace(window_store.read(), source_space, id, None);
-            let members = window_store.read().workspace_windows(id);
-            self.ensure_workspace_layouts(window_store, target_space, target_screen_size);
-            let moved: Vec<_> = members
-                .into_iter()
-                .filter(|&window| {
-                    self.relocate_window_to_workspace(
-                        window_store,
-                        id,
-                        (target_space, destination),
-                        window,
-                        WindowRelocation::Workspace,
-                    )
-                })
-                .collect();
-            let changed =
-                self.workspaces.reading(window_store.read()).active_workspace(target_space)
-                    != Some(destination);
-            self.workspaces.set_active_workspace(window_store, target_space, destination);
-            return EventResponse {
-                changed: changed || !moved.is_empty(),
-                workspace_space: Some(target_space),
-                focus_window: focus
-                    .filter(|window| moved.contains(window))
-                    .or_else(|| moved.first().copied()),
-                transferred_windows: moved.clone(),
-                raise_windows: moved,
-                ..EventResponse::default()
-            };
-        }
+            WorkspaceMove::Members { from, index } => {
+                return self.move_workspace_members(
+                    window_store,
+                    (source_space, from),
+                    (target_space, target_screen_size),
+                    index,
+                );
+            }
+            WorkspaceMove::Transfer(id) => id,
+        };
         let display = self.display_uuid_for_space(target_space).map(str::to_owned);
         self.transfer_workspace(
             window_store,
@@ -3902,6 +3916,59 @@ impl LayoutEngine {
             display.as_deref(),
             crate::model::virtual_workspace::WorkspaceTransferReason::Explicit,
         )
+    }
+
+    /// Per display: the members of `id` move to the workspace at `index` on the target Space,
+    /// which is initialised first (as placing a window there does).
+    fn move_workspace_members(
+        &mut self,
+        window_store: &mut WindowsMut<'_>,
+        (source_space, id): (SpaceId, VirtualWorkspaceId),
+        (target_space, target_screen_size): (SpaceId, CGSize),
+        index: usize,
+    ) -> EventResponse {
+        self.workspaces.ensure_space_initialized(window_store, target_space);
+        let found = self
+            .workspaces
+            .reading(window_store.read())
+            .workspace_id_at(target_space, Some(index));
+        let destination = match rift_core::placement::members_destination(found) {
+            Ok(destination) => destination,
+            Err(reason) => {
+                debug!(?target_space, index, ?reason, "Workspace move refused");
+                return EventResponse::default();
+            }
+        };
+        let focus = self.preferred_focus_for_workspace(window_store.read(), source_space, id, None);
+        let members = window_store.read().workspace_windows(id);
+        self.ensure_workspace_layouts(window_store, target_space, target_screen_size);
+        let moved: Vec<_> = members
+            .into_iter()
+            .filter(|&window| {
+                self.relocate_window_to_workspace(
+                    window_store,
+                    id,
+                    (target_space, destination),
+                    window,
+                    WindowRelocation::Workspace,
+                )
+            })
+            .collect();
+        let changed = self.workspaces.reading(window_store.read()).active_workspace(target_space)
+            != Some(destination);
+        self.workspaces.set_active_workspace(window_store, target_space, destination);
+        let focus_window = match rift_core::placement::moved_focus(focus, &moved) {
+            MovedFocus::Preferred(window) | MovedFocus::First(window) => Some(window),
+            MovedFocus::Nothing => None,
+        };
+        EventResponse {
+            changed: changed || !moved.is_empty(),
+            workspace_space: Some(target_space),
+            focus_window,
+            transferred_windows: moved.clone(),
+            raise_windows: moved,
+            ..EventResponse::default()
+        }
     }
 
     /// Whether an app rule names the workspace for a window with this context (read by the
@@ -5133,6 +5200,172 @@ mod tests {
                 "preserve {preserve}"
             );
         }
+    }
+
+    /// An added window's facts: the floating set (not the projection), and whether the tree
+    /// holds it.
+    #[test]
+    fn an_added_windows_facts_read_the_floating_set_and_the_tree() {
+        let (engine, store, space, a, _, window) = relocation_fixture(LayoutMode::Floating, false);
+        assert!(engine.is_window_floating(window) && !engine.floats.is_floating(window));
+        let facts = engine.addition_facts(store.view(), space, window);
+        assert!(!facts.in_floats);
+        assert_eq!(facts.workspace, Some((a, Family::Floating)));
+        assert!(facts.tree.is_some_and(|tree| tree.holds_window));
+    }
+
+    /// A floating window added to a floating layout leaves the floating set.
+    #[test]
+    fn a_floating_window_added_to_a_floating_layout_leaves_the_floating_set() {
+        let (mut engine, store, space, _, _, window) =
+            relocation_fixture(LayoutMode::Floating, false);
+        engine.floats.add_floating(window);
+        let _ = engine.add_window_to_layout(store.view(), space, window);
+        assert!(!engine.floats.is_floating(window));
+    }
+
+    /// Per display, moving the shown workspace moves its members and focuses one of them.
+    #[test]
+    fn moving_the_shown_workspace_per_display_focuses_a_moved_member() {
+        // Its focus moves with it; a minimized member is no focus of its own, but it moved, so
+        // the first moved window is focused.
+        for minimized in [false, true] {
+            let settings = VirtualWorkspaceSettings {
+                mode: crate::common::config::WorkspaceMode::PerDisplay,
+                ..VirtualWorkspaceSettings::default()
+            };
+            let mut engine = LayoutEngine::new(&settings, &LayoutSettings::default());
+            let mut store = OwnedWindows::default();
+            let (a, b) = (SpaceId::new(97), SpaceId::new(98));
+            for space in [a, b] {
+                shown_space(&mut engine, &mut store, space);
+            }
+            let window = WindowId::new(7, 1);
+            store
+                .view_mut()
+                .insert_manageable_window(window, live_window(CGSize::new(400.0, 300.0)));
+            let shown = engine.workspaces.reading(store.view()).active_workspace(a).unwrap();
+            assert!(engine.workspaces.assign_window_to_workspace(
+                &mut store.view_mut(),
+                a,
+                window,
+                shown
+            ));
+            let _ = engine.handle_event(&mut store.view_mut(), LayoutEvent::WindowAdded(a, window));
+            store.view_mut().window_mut(window).unwrap().info.is_minimized = minimized;
+            assert_eq!(
+                engine.preferred_focus_for_workspace(store.view(), a, shown, None).is_some(),
+                !minimized
+            );
+            let moved = engine.move_active_workspace_to_space(
+                &mut store.view_mut(),
+                a,
+                b,
+                CGSize::new(1200.0, 800.0),
+            );
+            assert_eq!(moved.transferred_windows, vec![window], "minimized {minimized}");
+            assert_eq!(moved.focus_window, Some(window), "minimized {minimized}");
+        }
+    }
+
+    /// A claimed window records only its rule's management override; it is not assigned.
+    #[test]
+    fn a_claimed_window_records_its_rules_management_override() {
+        let settings = VirtualWorkspaceSettings {
+            app_rules: vec![crate::common::config::AppWorkspaceRule {
+                app_id: Some("com.example.Claimed".into()),
+                manage: Some(false),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut engine = LayoutEngine::new(&settings, &LayoutSettings::default());
+        let mut store = OwnedWindows::default();
+        let space = SpaceId::new(91);
+        shown_space(&mut engine, &mut store, space);
+        let window = WindowId::new(7, 1);
+        store
+            .view_mut()
+            .insert_manageable_window(window, live_window(CGSize::new(400.0, 300.0)));
+        store.view_mut().insert_claim(
+            window,
+            crate::model::window_store::ClaimOwner(1),
+            rift_protocol::WindowClaimFlags::empty(),
+        );
+        let context = WindowRuleContext {
+            app_bundle_id: Some("com.example.Claimed"),
+            ..WindowRuleContext::default()
+        };
+        let result = engine.assign_window_with_app_info(
+            &mut store.view_mut(),
+            window,
+            space,
+            context,
+            false,
+        );
+        assert!(matches!(result, Ok(None)));
+        assert_eq!(store.view().manage_override(window), Some(false));
+    }
+
+    /// A restore drops the rule's workspace; a kept plan or no rule leaves the decision.
+    #[test]
+    fn a_restore_drops_the_rules_workspace_from_the_decision() {
+        use crate::model::app_rules::AppRuleDecision;
+        let named = || {
+            Some(AppRuleDecision {
+                workspace: Some(crate::common::config::WorkspaceSelector::Index(1)),
+                ..AppRuleDecision::default()
+            })
+        };
+        let mut decision = named();
+        apply_rule_workspace(RuleWorkspace::DroppedByRestore, &mut decision);
+        assert_eq!(decision.map(|decision| decision.workspace), Some(None));
+        let mut decision = named();
+        apply_rule_workspace(RuleWorkspace::Kept, &mut decision);
+        assert_eq!(decision, named());
+    }
+
+    /// A rule that no longer floats a floating window unfloats it.
+    #[test]
+    fn a_rule_that_no_longer_floats_a_window_unfloats_it() {
+        let (mut engine, _, space, a, _, window) =
+            relocation_fixture(LayoutMode::Traditional, false);
+        engine.floats.add_floating(window);
+        let effects = crate::model::app_rules::AppRuleEffects {
+            source_workspace: None,
+            workspace_id: a,
+            floating: false,
+            position: None,
+            size: None,
+            respect_min_size: false,
+            focus: false,
+            was_rule_floating: true,
+        };
+        let _ = engine.apply_app_rule_outcome(
+            window,
+            space,
+            true,
+            effects,
+            &mut AppRuleOutcome::default(),
+        );
+        assert!(!engine.floats.is_floating(window));
+    }
+
+    /// A floating toggle's options: centred on the screen, smart-sized to a share of it.
+    #[test]
+    fn a_floating_toggle_centres_and_smart_sizes_as_asked() {
+        let frame = CGRect::new(CGPoint::new(10.0, 20.0), CGSize::new(300.0, 200.0));
+        let screen = CGRect::new(CGPoint::new(1000.0, 0.0), CGSize::new(1000.0, 800.0));
+        assert_eq!(requested_floating_frame(frame, screen, false, None), frame);
+        assert_eq!(
+            requested_floating_frame(frame, screen, true, None),
+            CGRect::new(CGPoint::new(1350.0, 300.0), frame.size)
+        );
+        let smart = Some(FloatingWindowSize::Preset(FloatingWindowSizePreset::Smart));
+        assert_eq!(
+            requested_floating_frame(frame, screen, false, smart),
+            CGRect::new(frame.origin, CGSize::new(800.0, 744.0))
+        );
     }
 
     fn overview_fixture() -> (LayoutEngine, OwnedWindows, crate::actor::reactor::OverviewDrop) {

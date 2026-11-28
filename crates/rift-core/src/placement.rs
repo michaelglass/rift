@@ -527,6 +527,340 @@ pub fn relocation<K: Copy + PartialEq, S: PartialEq, D, T, L>(
     Relocation::Move { assign, projection, afterwards }
 }
 
+/// Why a window observed on a Space is not added to a layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Skipped {
+    /// It is not admitted for management.
+    Unadmitted,
+    /// It is in native fullscreen, suspended from the layout.
+    FullscreenSuspended,
+    /// The Space's workspaces assign it to none.
+    Unassigned,
+}
+
+/// The destination's tree for an added window: its layout on the Space, and whether it holds
+/// the window already.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Tree<L> {
+    pub layout: L,
+    pub holds_window: bool,
+}
+
+/// What adding a window is decided from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AdditionFacts<K, L> {
+    pub admitted: bool,
+    pub fullscreen_suspended: bool,
+    /// The workspace the window is assigned to on the Space, and its family.
+    pub workspace: Option<(K, Family)>,
+    pub in_floats: bool,
+    /// The workspace's layout on the Space, if it has one.
+    pub tree: Option<Tree<L>>,
+    pub preserve_widths: bool,
+}
+
+/// How an added window goes into its workspace's tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Insert<L, Wd> {
+    /// The tree holds it already.
+    Present,
+    Add {
+        layout: L,
+        width: Wd,
+    },
+    /// The workspace has no layout on the Space (a warning: it is not added).
+    NoLayout,
+}
+
+/// What adding an observed window to its workspace's layout does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Addition<K, L> {
+    Skip(Skipped),
+    /// It floats: nothing is inserted.
+    Float {
+        workspace: K,
+    },
+    /// It is tiled, its width kept or not.
+    Tile {
+        workspace: K,
+        insert: Insert<L, Width>,
+    },
+    /// Its workspace is a floating layout: it leaves the floating set and joins that layout
+    /// (never scrolling, so no width to keep).
+    IntoFloatingLayout {
+        workspace: K,
+        insert: Insert<L, ()>,
+    },
+}
+
+fn insert<L, Wd>(tree: Option<Tree<L>>, width: Wd) -> Insert<L, Wd> {
+    match tree {
+        None => Insert::NoLayout,
+        Some(Tree { holds_window: true, .. }) => Insert::Present,
+        Some(Tree { layout, holds_window: false }) => Insert::Add { layout, width },
+    }
+}
+
+impl<L, Wd> Insert<L, Wd> {
+    /// The same insertion with its width answer replaced.
+    pub fn with_width<W2>(self, width: impl FnOnce(Wd) -> W2) -> Insert<L, W2> {
+        match self {
+            Insert::Present => Insert::Present,
+            Insert::Add { layout, width: w } => Insert::Add { layout, width: width(w) },
+            Insert::NoLayout => Insert::NoLayout,
+        }
+    }
+}
+
+/// What adding an observed window does, from its facts.
+pub fn addition<K, L>(facts: AdditionFacts<K, L>) -> Addition<K, L> {
+    if !facts.admitted {
+        return Addition::Skip(Skipped::Unadmitted);
+    }
+    if facts.fullscreen_suspended {
+        return Addition::Skip(Skipped::FullscreenSuspended);
+    }
+    let Some((workspace, family)) = facts.workspace else {
+        return Addition::Skip(Skipped::Unassigned);
+    };
+    match (family, facts.in_floats) {
+        (Family::Floating, _) => Addition::IntoFloatingLayout {
+            workspace,
+            insert: insert(facts.tree, ()),
+        },
+        (Family::Scrolling | Family::Tiled, true) => Addition::Float { workspace },
+        (Family::Scrolling, false) if facts.preserve_widths => Addition::Tile {
+            workspace,
+            insert: insert(facts.tree, Width::Preserve),
+        },
+        (Family::Scrolling | Family::Tiled, false) => Addition::Tile {
+            workspace,
+            insert: insert(facts.tree, Width::AsIs),
+        },
+    }
+}
+
+/// Why moving a window to another Space is refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowMoveRefusal {
+    /// The window is in no workspace of its Space.
+    NotAMember,
+    /// The destination Space shows no workspace.
+    NoWorkspace,
+}
+
+/// What moving a window to another Space does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowMove<K> {
+    Refused(WindowMoveRefusal),
+    /// From its workspace into the destination's shown one.
+    Move {
+        from: K,
+        to: K,
+    },
+}
+
+/// What moving a window from workspace `from` to a Space showing `to` does.
+pub fn window_move<K>(from: Option<K>, to: Option<K>) -> WindowMove<K> {
+    match (from, to) {
+        (None, _) => WindowMove::Refused(WindowMoveRefusal::NotAMember),
+        (Some(_), None) => WindowMove::Refused(WindowMoveRefusal::NoWorkspace),
+        (Some(from), Some(to)) => WindowMove::Move { from, to },
+    }
+}
+
+/// How a moved window lands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Landing {
+    /// It cannot be placed there (hidden, minimized, claimed): the move is a change, nothing more.
+    Hidden,
+    /// It is focused and raised there.
+    Focused,
+}
+
+/// How a moved window lands, by whether it can be placed.
+pub fn landing(placeable: bool) -> Landing {
+    if placeable {
+        Landing::Focused
+    } else {
+        Landing::Hidden
+    }
+}
+
+/// Why moving the shown workspace to another Space is refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspaceMoveRefusal {
+    /// The Space shows no workspace.
+    Nothing,
+    /// Per display, onto the Space it is on.
+    SameSpace,
+    /// Per display, the shown workspace has no index on its Space.
+    NoIndex,
+    /// Per display, the destination has no workspace at that index.
+    NoDestination,
+}
+
+/// What moving the shown workspace to another Space does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspaceMove<K> {
+    Refused(WorkspaceMoveRefusal),
+    /// Per display (each display has its own workspaces): the members move to the workspace at
+    /// the same index on the destination.
+    Members {
+        from: K,
+        index: usize,
+    },
+    /// The workspace itself moves (its identity goes with it).
+    Transfer(K),
+}
+
+/// What moving the workspace `shown` to another Space does.
+pub fn workspace_move<K>(
+    shown: Option<K>,
+    per_display: bool,
+    same_space: bool,
+    index: Option<usize>,
+) -> WorkspaceMove<K> {
+    let Some(shown) = shown else {
+        return WorkspaceMove::Refused(WorkspaceMoveRefusal::Nothing);
+    };
+    match (per_display, same_space, index) {
+        (false, _, _) => WorkspaceMove::Transfer(shown),
+        (true, true, _) => WorkspaceMove::Refused(WorkspaceMoveRefusal::SameSpace),
+        (true, false, None) => WorkspaceMove::Refused(WorkspaceMoveRefusal::NoIndex),
+        (true, false, Some(index)) => WorkspaceMove::Members { from: shown, index },
+    }
+}
+
+/// The workspace the members go to, once the destination is initialised.
+pub fn members_destination<K>(found: Option<K>) -> Result<K, WorkspaceMoveRefusal> {
+    found.ok_or(WorkspaceMoveRefusal::NoDestination)
+}
+
+/// The window focused after moving members.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MovedFocus<W> {
+    /// The workspace's focus moved with it.
+    Preferred(W),
+    /// Its focus stayed: the first window moved.
+    First(W),
+    /// Nothing moved.
+    Nothing,
+}
+
+/// The window focused after moving `moved`, the workspace's focus having been `preferred`.
+pub fn moved_focus<W: Copy + PartialEq>(preferred: Option<W>, moved: &[W]) -> MovedFocus<W> {
+    match (preferred.filter(|window| moved.contains(window)), moved.first()) {
+        (Some(window), _) => MovedFocus::Preferred(window),
+        (None, Some(&first)) => MovedFocus::First(first),
+        (None, None) => MovedFocus::Nothing,
+    }
+}
+
+/// Who manages a claimed window: its rule, or the rule's override.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Manage<O> {
+    ByRule,
+    Override(O),
+}
+
+/// Whether a window an app rule evaluated is claimed by another owner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Claim<O> {
+    /// Claimed: only its management override is recorded; it is not assigned.
+    Claimed {
+        manage: Manage<O>,
+    },
+    Free,
+}
+
+/// Whether a window is claimed, and its rule's management override (none: the rule manages).
+pub fn claim<O>(claimed: bool, management_override: Option<O>) -> Claim<O> {
+    match (claimed, management_override) {
+        (false, _) => Claim::Free,
+        (true, None) => Claim::Claimed { manage: Manage::ByRule },
+        (true, Some(o)) => Claim::Claimed { manage: Manage::Override(o) },
+    }
+}
+
+/// Whether an app rule's workspace stands for an assigned window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuleWorkspace {
+    Kept,
+    /// A persistence match restores the user's workspace: the rule's default placement must
+    /// not relocate the window.
+    DroppedByRestore,
+}
+
+/// Whether the window's native layout memory is forgotten.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeLayout {
+    /// The rule is re-applied with a workspace of its own: the old native layout is stale.
+    Forgotten,
+    Kept,
+}
+
+/// What assigning a free window does besides the assignment itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Assignment {
+    pub rule_workspace: RuleWorkspace,
+    pub native: NativeLayout,
+}
+
+/// What assigning a free window does: `restored` (a persistence match), `reapply` (the rule's
+/// workspace is applied again), and whether the rule names a workspace.
+pub fn assignment(restored: bool, reapply: bool, rule_names_workspace: bool) -> Assignment {
+    let rule_workspace = if restored {
+        RuleWorkspace::DroppedByRestore
+    } else {
+        RuleWorkspace::Kept
+    };
+    let native = if reapply && rule_names_workspace && !restored {
+        NativeLayout::Forgotten
+    } else {
+        NativeLayout::Kept
+    };
+    Assignment { rule_workspace, native }
+}
+
+/// What an app rule does to a window's floating state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuleFloat {
+    Float,
+    Unfloat,
+    Keep,
+}
+
+/// What an app rule that says the window `should_float` does to one that `was_floating`.
+pub fn rule_float(should_float: bool, was_floating: bool) -> RuleFloat {
+    match (should_float, was_floating) {
+        (true, _) => RuleFloat::Float,
+        (false, true) => RuleFloat::Unfloat,
+        (false, false) => RuleFloat::Keep,
+    }
+}
+
+/// The frame request an app rule makes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RuleFrame<P, R> {
+    /// A floating placement.
+    Place(P),
+    /// A tiled resize.
+    Resize(R),
+    /// No frame request.
+    #[default]
+    Keep,
+}
+
+/// The frame request: a floating placement if the rule makes one, else a tiled resize.
+pub fn rule_frame<P, R>(place: Option<P>, resize: Option<R>) -> RuleFrame<P, R> {
+    match (place, resize) {
+        (Some(place), _) => RuleFrame::Place(place),
+        (None, Some(resize)) => RuleFrame::Resize(resize),
+        (None, None) => RuleFrame::Keep,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -795,6 +1129,190 @@ mod tests {
             Afterwards::AsIs
         );
         assert_eq!(afterwards(moving(Policy::Workspace)), Afterwards::AsIs);
+    }
+
+    fn adding(workspace: Option<(u32, Family)>) -> AdditionFacts<u32, char> {
+        AdditionFacts {
+            admitted: true,
+            fullscreen_suspended: false,
+            workspace,
+            in_floats: false,
+            tree: Some(Tree {
+                layout: 'L',
+                holds_window: false,
+            }),
+            preserve_widths: true,
+        }
+    }
+
+    #[test]
+    fn an_added_window_is_skipped_floats_tiles_or_joins_a_floating_layout() {
+        let tiled = adding(Some((1, Family::Tiled)));
+        assert_eq!(
+            addition(AdditionFacts { admitted: false, ..tiled }),
+            Addition::Skip(Skipped::Unadmitted)
+        );
+        assert_eq!(
+            addition(AdditionFacts {
+                fullscreen_suspended: true,
+                ..tiled
+            }),
+            Addition::Skip(Skipped::FullscreenSuspended)
+        );
+        assert_eq!(addition(adding(None)), Addition::Skip(Skipped::Unassigned));
+        assert_eq!(
+            addition(AdditionFacts { in_floats: true, ..tiled }),
+            Addition::Float { workspace: 1 }
+        );
+        assert_eq!(addition(tiled), Addition::Tile {
+            workspace: 1,
+            insert: Insert::Add {
+                layout: 'L',
+                width: Width::AsIs
+            }
+        });
+        let scrolling = adding(Some((1, Family::Scrolling)));
+        assert_eq!(addition(scrolling), Addition::Tile {
+            workspace: 1,
+            insert: Insert::Add {
+                layout: 'L',
+                width: Width::Preserve
+            }
+        });
+        assert_eq!(
+            addition(AdditionFacts {
+                preserve_widths: false,
+                ..scrolling
+            }),
+            Addition::Tile {
+                workspace: 1,
+                insert: Insert::Add {
+                    layout: 'L',
+                    width: Width::AsIs
+                }
+            }
+        );
+        assert_eq!(
+            addition(AdditionFacts {
+                tree: Some(Tree {
+                    layout: 'L',
+                    holds_window: true
+                }),
+                ..tiled
+            }),
+            Addition::Tile {
+                workspace: 1,
+                insert: Insert::Present
+            }
+        );
+        assert_eq!(addition(AdditionFacts { tree: None, ..tiled }), Addition::Tile {
+            workspace: 1,
+            insert: Insert::NoLayout
+        });
+        // A floating layout takes it in, floating or not.
+        for in_floats in [true, false] {
+            assert_eq!(
+                addition(AdditionFacts {
+                    in_floats,
+                    ..adding(Some((1, Family::Floating)))
+                }),
+                Addition::IntoFloatingLayout {
+                    workspace: 1,
+                    insert: Insert::Add { layout: 'L', width: () }
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn a_window_moves_to_a_space_showing_a_workspace_and_lands_focused_if_placeable() {
+        assert_eq!(
+            window_move(None, Some(2)),
+            WindowMove::Refused(WindowMoveRefusal::NotAMember)
+        );
+        assert_eq!(
+            window_move(Some(1), None::<u32>),
+            WindowMove::Refused(WindowMoveRefusal::NoWorkspace)
+        );
+        assert_eq!(window_move(Some(1), Some(2)), WindowMove::Move {
+            from: 1,
+            to: 2
+        });
+        assert_eq!(landing(true), Landing::Focused);
+        assert_eq!(landing(false), Landing::Hidden);
+    }
+
+    #[test]
+    fn a_shown_workspace_moves_its_members_per_display_and_transfers_otherwise() {
+        use WorkspaceMoveRefusal as R;
+        assert_eq!(
+            workspace_move(None::<u32>, true, false, Some(0)),
+            WorkspaceMove::Refused(R::Nothing)
+        );
+        assert_eq!(
+            workspace_move(None::<u32>, false, false, Some(0)),
+            WorkspaceMove::Refused(R::Nothing)
+        );
+        assert_eq!(
+            workspace_move(Some(1), true, true, Some(0)),
+            WorkspaceMove::Refused(R::SameSpace)
+        );
+        assert_eq!(
+            workspace_move(Some(1), true, false, None),
+            WorkspaceMove::Refused(R::NoIndex)
+        );
+        assert_eq!(
+            workspace_move(Some(1), true, false, Some(2)),
+            WorkspaceMove::Members { from: 1, index: 2 }
+        );
+        assert_eq!(
+            workspace_move(Some(1), false, false, Some(0)),
+            WorkspaceMove::Transfer(1)
+        );
+        // A transfer onto its own Space or without an index is still a transfer.
+        assert_eq!(
+            workspace_move(Some(1), false, true, None),
+            WorkspaceMove::Transfer(1)
+        );
+        assert_eq!(members_destination(Some(3)), Ok(3));
+        assert_eq!(members_destination(None::<u32>), Err(R::NoDestination));
+        assert_eq!(moved_focus(Some(2), &[1, 2]), MovedFocus::Preferred(2));
+        assert_eq!(moved_focus(Some(9), &[1, 2]), MovedFocus::First(1));
+        assert_eq!(moved_focus(None, &[1, 2]), MovedFocus::First(1));
+        assert_eq!(moved_focus(Some(9), &[]), MovedFocus::Nothing);
+    }
+
+    #[test]
+    fn a_claimed_window_records_only_its_management_and_a_restore_drops_the_rules_workspace() {
+        assert_eq!(claim(false, Some('o')), Claim::Free);
+        assert_eq!(claim(true, None::<char>), Claim::Claimed {
+            manage: Manage::ByRule
+        });
+        assert_eq!(claim(true, Some('o')), Claim::Claimed {
+            manage: Manage::Override('o')
+        });
+        let kept = |native| Assignment {
+            rule_workspace: RuleWorkspace::Kept,
+            native,
+        };
+        assert_eq!(assignment(false, true, true), kept(NativeLayout::Forgotten));
+        assert_eq!(assignment(false, false, true), kept(NativeLayout::Kept));
+        assert_eq!(assignment(false, true, false), kept(NativeLayout::Kept));
+        assert_eq!(assignment(true, true, true), Assignment {
+            rule_workspace: RuleWorkspace::DroppedByRestore,
+            native: NativeLayout::Kept
+        });
+    }
+
+    #[test]
+    fn an_app_rule_floats_unfloats_or_keeps_and_requests_a_placement_before_a_resize() {
+        assert_eq!(rule_float(true, false), RuleFloat::Float);
+        assert_eq!(rule_float(true, true), RuleFloat::Float);
+        assert_eq!(rule_float(false, true), RuleFloat::Unfloat);
+        assert_eq!(rule_float(false, false), RuleFloat::Keep);
+        assert_eq!(rule_frame(Some('p'), Some('r')), RuleFrame::Place('p'));
+        assert_eq!(rule_frame(None::<char>, Some('r')), RuleFrame::Resize('r'));
+        assert_eq!(rule_frame(None::<char>, None::<char>), RuleFrame::Keep);
     }
 
     #[test]
