@@ -677,8 +677,66 @@ left, its workspace's position there and the workspace it landed in; it was the 
   in Roc, a window that stayed recorded, a replacement keeping the target's record, a quit
   app's records kept.
 
-- Next: E3c (the native-layout memory), after naming any layout system whose state is not
-  core-owned.
+**Rulings before E3c (the lead, 2026-11-28).** Not core-owned today: Scrolling's per-layout
+camera, and each workspace's `WorkspaceLayoutState`. (1) The camera reaches the core first, as
+its own slice, **E3-cam**, with no exception: resetting it on restore would lose a restored
+workspace's scroll position. (2) `WorkspaceLayoutState` folds into E3c: a snapshot is (core
+layout value, active layout, active size, camera); the obsolete migration ids are parsed once at
+load and dropped from live state. (3) E3c holds the Rust core value and reseeds the Roc twin on
+restore, counting those reseeds apart from reseeds after a disagreement. Order: E3-cam, E3c, E1.
+
+#### E3-cam: the scrolling camera as a core machine (plan, cam-0)
+
+What the camera is today: per layout, in `ScrollingLayoutSystem.layouts`, a `Camera` (the
+`Viewport` with its `Rest` and `Motion`, the gesture's `MotionHistory`, `transient_restore`,
+`showing`, `restored_view`) beside a `Geometry`. About 120 reads and writes in `scrolling.rs`;
+19 callers outside it (the reactor's presenter and gestures). (h)'s types stay as they are.
+
+| State | Kind | Decided by | Moves to |
+|---|---|---|---|
+| `Viewport` (`Uninitialized`, `Gesture`, `Resting(Rest, Motion)`) | camera state | camera | the core |
+| `Motion::Animation(CameraSpring)` (from, target, velocity, current, started, sampled) | camera state; its two instants are inputs it stored | camera | the core, instants as `Time` |
+| `MotionHistory` (recent deltas with their timestamps, overscroll) | camera state | camera | the core |
+| `Showing` (`Strip`, `Fullscreen { window, return_to }`) | camera state, changed only on the columns core's answers | camera | the core |
+| `transient_restore`, `restored_view` (bookmarks) | camera state | camera | the core |
+| `Geometry` (screen, tiling, gaps, constraints, column spans, frames, bounds, snaps) | prepared-frame cache, rebuilt from core state | host | **stays host**; the camera reads a projection of it |
+| `ViewportPresentation` (the presenter's clone, motion behind a mutex) | the presenter's copy | presenter (effect) | stays the presenter's; its result returns as an event |
+
+**Design.**
+- **One machine for every scrolling layout's camera**, `rift_core::camera::Cameras<L, C, W>`
+  (layout, column, window), held by `ScrollingLayoutSystem` beside the columns core, as the
+  columns core holds every arrangement. Saved as today: the saved form does not change.
+- **Geometry crosses as an input, never as state.** Each event that reads it carries a `Spans`
+  projection of the host's cache: each laid-out column's id, world x and width, the bounds, the
+  view width, the snap points, and the anchor offsets for the configured alignment. The camera
+  never keeps it; a pass with new geometry is one event, `Settled`, which is the single settle
+  point (rebase on the held bookmark, reconcile the owed return against the columns core's
+  fullscreen facts, move the target into bounds or onto the centred column).
+- **The clock crosses as an input.** `Instant` becomes `Time`, seconds on the host's monotonic
+  clock, carried by every event that samples, aims or springs (the settle point's
+  `Instant::now()` becomes the event's `now`). A spring keeps the `Time`s it was given.
+- **The arrangement's facts cross as inputs too**: the active column, the selected window and
+  the fullscreen windows, from the columns core's view at each entry point, as today.
+- **The camera's choices are answers.** A column the camera chooses (a gesture's release, a
+  snap, a restored bookmark) is answered, and the host has the columns core make it active, as
+  `activate_chosen` does now; `scroll_by_delta`'s boundary excess and a release's
+  `ViewportRelease` are answers.
+- **Invariants kept, and planted:** the single settle point; `Viewport::presented` never
+  overwrites a target the layout set; `Showing` changes only on the columns core's answers
+  (`Fullscreened`, a removal or replacement naming the window) and is reconciled at the settle
+  point.
+
+**Steps** (each published on its own):
+1. **cam-1, the Rust core**: `rift_core::camera` with (h)'s types, events and answers, `Time` and
+   `Spans` as inputs, unit tests moved with it; the scrolling system steps it beside its own
+   camera and compares in tests (the shadow).
+2. **cam-2, flip**: the scrolling system's camera code goes; it projects `Spans`, steps the core
+   and applies its answers. Plants on the invariants.
+3. **cam-3, the Roc port**: `roc/core/Cameras.roc`, a differential over random gestures, edits,
+   presentations and settles, and a copy tripwire.
+4. **cam-4, Roc decides**: twinned (policy (a)) like the other machines.
+
+Then E3c, then E1.
 
 **Pruning (the lead, 2026-11-26):** at a milestone, delete only what no future build reuses:
 stale `target/roc-build` keys (all but the current sources', which the build script's line
