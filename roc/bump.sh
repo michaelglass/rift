@@ -78,12 +78,15 @@ else
     echo "roc-bump: rift-core-roc's layout tests still fail under --opt=dev at $latest (target/roc-dev.log)"
 fi
 # The same crash reduced (roc/repros/recursive-nominal-payload): a nominal record as a recursive
-# union's variant payload, which --opt=size and --opt=dev misread. Never a gate.
-for opt in dev size; do
-    if ROC="$home/current/roc" roc/repros/recursive-nominal-payload/run.sh "$opt" 2>/dev/null | grep -qx 7; then
-        echo "roc-bump: the recursive-nominal-payload repro passes under --opt=$opt at $latest (report it)"
+# union's variant payload, which Boxy lowering (--specialize=no, the default for --opt=size and
+# --opt=dev) misreads; rift builds with --specialize=yes. Never a gate: each probe says whether
+# Boxy still has the bug.
+for probe in "dev" "size" "speed no"; do
+    set -- $probe
+    if ROC="$home/current/roc" roc/repros/recursive-nominal-payload/run.sh "$@" 2>/dev/null | grep -qx 7; then
+        echo "roc-bump: the recursive-nominal-payload repro passes under --opt=$1${2:+ --specialize=$2} at $latest (report it)"
     else
-        echo "roc-bump: the recursive-nominal-payload repro still crashes under --opt=$opt at $latest"
+        echo "roc-bump: the recursive-nominal-payload repro still crashes under --opt=$1${2:+ --specialize=$2} at $latest"
     fi
 done
 if roc/check.sh; then

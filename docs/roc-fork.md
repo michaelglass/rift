@@ -1366,6 +1366,39 @@ words).
   engine does not hold), caught at the engine's door; and an Edit question answered with an
   Override.
 
+**Input tests, before E1c-4b (2026-11-28).** A full check failed twice on
+`overview_shortcuts_override_global_bindings_only_while_open`. Its key events came from no event
+source, so macOS stamped them with the session's live modifier state; it now uses the private
+source the file's other tests use. A search for tests reaching outside found
+`native_hold_timeout_does_not_reject_a_slow_physical_stroke` posting two real scroll events into
+the session each run; the gesture forwarder takes its post sink now, the test records the events,
+and under `cfg(test)` the session fallback panics. Proven by three consecutive green full checks.
+
+### Size with specialization (2026-11-28)
+
+The Roc core builds with `--opt=size --specialize=yes`, both explicit in
+`crates/rift-core-roc/build.rs` (`ROC_OPT=speed` the explicit alternative, `ROC_OPT=dev` only for
+the bump probe). The lead found that the nominal-payload crash follows `--specialize`, not
+`--opt`: Boxy lowering (`--specialize=no`, the default for `--opt=size` and `--opt=dev`) misreads
+the payload; lambda-set specialization is right under either optimizer. At nightly 2026-11-27,
+the repro (`roc/repros/recursive-nominal-payload/run.sh OPT [yes|no]`): dev, size and
+`speed --specialize=no` crash (exit 139); `size --specialize=yes` and speed print 7.
+
+Measured at E1c-4a's tip:
+
+| | speed | size + specialize |
+|---|---|---|
+| fresh `roc build` of the core (twice each) | 67.8 s, 69.5 s | 33.4 s, 33.7 s |
+| archive | 4.91 MB | 3.24 MB |
+| full check after a build.rs change | 322 s | 313 s |
+| full check, everything cached | 70 s | 71 s |
+| lib roc-core / rift-core-roc / Roc fuzzer | 26.1 / 27.4 / 66.2 s | 27.5 / 28.4 / 67.2 s |
+
+Every suite passes under both (the copy tripwires and every differential included); test run
+times are within run-to-run noise. The gain is the Roc build, about 35 s off every check after a
+Roc source change. `roc/bump.sh` probes the repro under dev, size and `speed --specialize=no`, so a
+bump says when Boxy's bug is fixed.
+
 - Next: E1c-4b (relocation in Roc).
 
 **Pruning (the lead, 2026-11-26):** at a milestone, delete only what no future build reuses:

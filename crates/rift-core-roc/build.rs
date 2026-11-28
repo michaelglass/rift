@@ -44,17 +44,32 @@ fn main() {
     println!("cargo:rerun-if-env-changed=ROC");
     println!("cargo:rerun-if-env-changed=ROC_SRC");
 
-    // Every build is optimized: the dev backend runs a different program (docs/roc-fork.md, "The
-    // dev backend"). `ROC_OPT=dev` exists only for `roc/bump.sh`'s probe of whether it still does.
+    // Every build is LLVM-optimized for size with lambda-set specialization, both explicit:
+    // Boxy lowering (`--specialize=no`, Roc's default for size and dev) misreads a nominal record
+    // as a recursive union's payload (roc/repros/recursive-nominal-payload), so it must never come
+    // back through a change to Roc's defaults; size builds the core in half speed's time
+    // (docs/roc-fork.md, "Size with specialization"). `ROC_OPT=speed` is the explicit
+    // alternative; `ROC_OPT=dev` exists only for `roc/bump.sh`'s probe of the dev backend
+    // (docs/roc-fork.md, "The dev backend").
     println!("cargo:rerun-if-env-changed=ROC_OPT");
-    let opt = match std::env::var("ROC_OPT").as_deref() {
-        Err(std::env::VarError::NotPresent) | Ok("speed") => "--opt=speed",
-        Ok("dev") => "--opt=dev",
-        other => panic!("ROC_OPT is speed or dev, not {other:?}"),
+    let build: &[&str] = match std::env::var("ROC_OPT").as_deref() {
+        Err(std::env::VarError::NotPresent) | Ok("size") => &[
+            "build",
+            "--target=arm64mac",
+            "--opt=size",
+            "--specialize=yes",
+        ],
+        Ok("speed") => &[
+            "build",
+            "--target=arm64mac",
+            "--opt=speed",
+            "--specialize=yes",
+        ],
+        Ok("dev") => &["build", "--target=arm64mac", "--opt=dev"],
+        other => panic!("ROC_OPT is size, speed or dev, not {other:?}"),
     };
-    let build = ["build", "--target=arm64mac", opt];
     let spec = Path::new(&roc_src).join("src/glue/src/RustGlue.roc");
-    let key = inputs_key(&roc_dir, &roc, &spec, &build);
+    let key = inputs_key(&roc_dir, &roc, &spec, build);
     // The target directory: `OUT_DIR` is `<target>/<profile>/build/<unit>/out`.
     let target = out.ancestors().nth(4).expect("OUT_DIR is under the target directory");
     let shared = target.join("roc-build").join(format!("{key:016x}"));
