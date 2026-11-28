@@ -82,7 +82,9 @@ pub(crate) fn displays_reseeds() -> u64 {
 static NATIVE_RESEEDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// How many times the native memory's Rust shadow has been re-seeded from the Roc core (each one
-/// a `roc-divergence:` warned).
+/// a `roc-divergence:` warned). The re-seed trims both sides, and that is not the Rust side
+/// overruling the Roc core: a workspace the Roc core holds with no Rust value could never be
+/// restored anyway.
 #[cfg(feature = "roc-core")]
 pub(crate) fn native_reseeds() -> u64 { NATIVE_RESEEDS.load(std::sync::atomic::Ordering::Relaxed) }
 

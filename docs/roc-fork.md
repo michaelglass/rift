@@ -974,7 +974,160 @@ what it alone owns: which workspaces hold a snapshot, and the batch (`Owned`); i
 **E3 is done:** the display memory, the evictions, the cameras and the native memory are core
 machines, each deciding in Roc.
 
-- Next: E1 (routing), to the end-of-E1 target.
+### E1-0: an inventory of what `engine.rs` still decides (2026-11-28)
+
+The end-of-E1 target: every function left in `engine.rs` is an **effect**, **glue** or a
+**query of core state**; no **decision** stays. After E2, E3 and E4, the file has 119 functions
+above its tests: 24 decisions (7 borderline), 35 effects, 22 glue, 38 queries. Classed as E0 was
+(each function's own reads and writes, its calls followed), strictly: a function that decides and
+acts is a decision, and "(borderline)" marks a judgement call, with why. Since E0, five moved to
+effect because their core machine now decides (`remember_native_departure`,
+`finish_native_reconcile`, `note_eviction`, `restore_native_layout`, `remap_space`); three E0
+effects are decisions under the stricter rule (`commit_workspace_focus`, the two `toggle_*`,
+`calculate_layout_with_groups`).
+
+**The decisions, by theme, each with its step** (order: the pieces routing calls first, routing
+last; (b) marks a borderline one):
+
+| step | theme | decisions | what moves to the core |
+|---|---|---|---|
+| E1a | focus choice | `preferred_focus_for_workspace`, `commit_workspace_focus` (b), `move_focus_internal`, `next_space_for_direction` | which window gets focus, whether a focus is kept and where it is recorded, the next Space in a direction: a focus question over the topology and the floats facts. Folded in: `suspend_window` clearing focus, `apply_focus_response` routing by floating, `focus_changes_geometry` |
+| E1b | workspace switching | `switch_to_workspace_id`, `navigate_to_workspace`, `ensure_active_workspace_info` (b) | whether and where to switch, the first workspace a Space activates: into the workspaces core, which holds the topology. Folded in: `transfer_workspace` re-laying the source only for an Explicit transfer |
+| E1c | placement and relocation | `add_window_to_layout`, `relocate_window_to_workspace`, `relocate_window_with_drop`, `move_window_to_space`, `move_active_workspace_to_space`, `DropPreview::action` (b), `assign_window_with_app_info` | where a window goes (floating or tiled, which workspace and Space, a drop's action, a persistence match over a rule's workspace), answered as a plan the engine applies. Folded in: `apply_window_drop`'s floating refusal, `drop_action_override`, `apply_app_rule_outcome`, `requested_floating_frame` (a pure conversion, moved with it) |
+| E1d | displays and the native reconcile | `update_space_display`, `begin_native_reconcile` (b) | which workspaces take a display as home (the display memory or the workspaces core); which moves are departures (the native memory takes the moves as facts). `LastSpace::Hold` stays a computed input until the config slice |
+| E1e | floating geometry in the layout pass | `calculate_layout_with_groups` (b) | a floating window's fallback frame (centred when hidden), its fullscreen frame by kind, where a hidden window is parked: a pure function in the floats core |
+| E1f | layout mode and settings | `switch_workspace_layout_mode`, `update_virtual_workspace_settings`, `toggle_orientation_for_system` (b), `toggle_stack_for_workspace` (b) | which mode or setting a command or a config change leaves a workspace with. Overlaps the config slice; done here so E1 meets its target |
+| E1g | command routing | `handle_command`, `handle_virtual_workspace_command` | which route a command takes, from facts: a `Route` the core returns and the engine carries out over the pieces above |
+| E1h | event routing | `handle_event_inner` | the same for layout events. Folded in: `normalize_event` taking the Space from the topology |
+
+**Stays, by the lead's decision:** `update_space_display`'s `saved_space_is_unresolved` input to
+`LastSpace::Hold` (persistence is the config slice's).
+
+**Every function** (line numbers at ff957f8c):
+
+| line | function | class | reads / writes | what it decides (decisions only) |
+|---|---|---|---|---|
+| 46 | `DropPreview::action` | decision (borderline) | - / preview value | the drop action for a same-slot Insert (config centre action instead), from `same_slot` and the action; pure value, could live with the drop machinery as a query |
+| 59 | `interval_gap` | glue | - / - | |
+| 63 | `requested_floating_frame` | glue (borderline) | - / - | (picks size from a preset and centres on request: a pure conversion of the request's options, no engine facts) |
+| 142 | `LayoutEvent::windows_observed` | glue | - / - | |
+| 181 | `LayoutEventOutcome::deref` | glue | - / - | |
+| 186 | `prepare_scrolling` | effect | W: a scrolling system / - | |
+| 241 | `StartingLayout::new` | glue | - / - | |
+| 263 | `NativeSnapshot::windows` | query | - / snapshot value | |
+| 268 | `NativeSnapshot::of` | glue | - / a workspace's system, layout state | |
+| 281 | `NativeSnapshot::updated` | glue | - / snapshot (its system applies the change) | |
+| 289 | `NativeSnapshot::restored` | glue | - / snapshot | |
+| 308 | `focused_window` | query | - / floats | |
+| 310 | `apply_window_drop` | effect (borderline) | W: systems, native, evicted / R: topology, mode | (refuses a drop in floating mode itself: a guard on the mode, else a system edit) |
+| 337 | `relocate_window_with_drop` | decision | W: systems, native, floats (focus, positions), topology last focus / R: topology, floats, systems | whether a drop is valid and how it lands: floating (frame) vs tiled (target tree), same vs other workspace, no-op checks; clears focus; from floats, topology, the prospective tree |
+| 448 | `drop_scene_windows` | query | - / topology, systems | |
+| 472 | `drop_action_override` | query (borderline) | - / topology, systems | (Swap for a stack layout: a fixed rule over the system kind) |
+| 485 | `drop_preview_frame` | query | - / topology, systems, constraints, layout_settings | |
+| 531 | `prospective_drop_tree` | query | - / systems (on a clone) | |
+| 548 | `source_move_neighbors` | query | - / topology, systems | |
+| 582 | `query_workspace_layout` | query | - / topology, systems | |
+| 609 | `calculate_workspace_layout` | query | - / topology, systems, constraints | |
+| 633 | `calculate_arrangement` | glue | - / systems | |
+| 652 | `project_arrangement` | glue | - / systems, constraints, layout_settings | |
+| 683 | `switch_workspace_layout_mode` | decision | W: systems, floats, native, constraints / R: topology, layout_settings, floats | which windows carry into the new mode (hidden members kept, floating dropped on entering/leaving floating mode), whether widths are preserved, which window is reselected; from mode, floats, settings |
+| 758 | `response_for_raised_windows` | glue | - / - | |
+| 771 | `toggle_orientation_for_system` | decision (borderline) | W: a system / R: the system | stack-edit vs orientation toggle, from the system's "parent is stacked" answer; arguably the system's own op |
+| 786 | `toggle_stack_for_workspace` | decision (borderline) | W: systems / R: systems | unstack, else stack, else raise visible; refocus selection; from the system's answers; arguably the system's own op |
+| 823 | `collect_group_containers_for_space` | query | - / topology, systems, constraints, layout_settings | |
+| 851 | `set_layout_settings` | effect | W: via apply / R: layout_settings | |
+| 859 | `apply_layout_settings` | effect | W: layout_settings, native, systems / R: topology, displays | |
+| 873 | `update_virtual_workspace_settings` | decision | W: app_rules, topology, systems / R: topology, settings | which workspaces switch layout mode on a settings change (mode policy unchanged, current != desired, previous != desired) |
+| 922 | `active_layout_mode_at` | query | - / topology, systems | |
+| 930 | `focus_changes_geometry` | query (borderline) | - / topology, systems | (scrolling/floating/stacked "changes geometry": a fixed rule over system kind) |
+| 942 | `layout_specific_animate_settings` | query | - / topology, systems, layout_settings | |
+| 959 | `active_floating_windows_in_workspace` | query | - / topology, floats | |
+| 974 | `is_floating_active` | query | - / floats, topology | |
+| 984 | `preferred_focus_for_workspace` | decision | - / topology, systems, floats | the window focused on activation: preferred, else workspace last focus, else tiled selection, else first visible, else floating last focus, else first floating |
+| 1018 | `commit_workspace_focus` | decision (borderline) | W: floats (focus, last focus), topology last focus, systems / R: topology, floats | whether a focus is kept (member of the active workspace and available) and where it is recorded (floating last focus vs system selection); the write-routing alone would be effect |
+| 1061 | `activate_workspace` | effect | W: topology / R: (focus via `preferred_focus_for_workspace`) | |
+| 1087 | `switch_to_workspace_id` | decision | W: topology / R: topology, settings | already-active target: back-and-forth to previous or nothing, from topology and `workspace_auto_back_and_forth` |
+| 1106 | `switch_to_previous_workspace` | glue | W: via navigate / R: topology `previous_target` | |
+| 1118 | `navigate_to_workspace` | decision | W: topology / R: topology | a target already shown on another display: focus there without activation vs full activation, from was-active and Space |
+| 1150 | `filter_active_workspace_windows` | query | - / topology | |
+| 1160 | `filter_active_workspace_window` | query | - / topology | |
+| 1169 | `is_active_workspace_window` | query | - / topology | |
+| 1182 | `resize_selection` | effect | W: systems, native, evicted / - | |
+| 1198 | `apply_focus_response` | effect (borderline) | W: floats, systems, topology last focus / R: floats | (routes the write by floating vs tiled; chooses nothing about which window) |
+| 1223 | `move_focus_internal` | decision | W: floats, systems, topology last focus / R: topology, systems, floats | which window directional focus lands on: floating cycle, floating to tiled, tiled in-layout, scrolling stop, next display, fallbacks; from floats, systems, display geometry |
+| 1351 | `next_space_for_direction` | decision | - / Space frames (args) | the display in a direction: aligned first, then nearest edge; pure geometry |
+| 1420 | `forget_native_layout_for_window_id` | effect | W: evicted, native / - | |
+| 1426 | `edit_native_snapshots` | effect | W: native / R: native | |
+| 1433 | `forget_native_layout_for_workspace` | effect | W: native, evicted / R: evicted | |
+| 1440 | `forget_native_layout_for_window` | effect | W: native, evicted / R: topology | |
+| 1447 | `remember_native_departure` | effect | W: native / R: topology, floats, native `keeps` | |
+| 1460 | `begin_native_reconcile` | decision (borderline) | W: native / R: topology | which moves count as departures (source Space != target); a fact filter the native core could take |
+| 1476 | `finish_native_reconcile` | effect | W: native, systems, evicted / R: native answer, evicted `stale` | |
+| 1491 | `note_eviction` | effect | W: evicted / R: topology, displays | |
+| 1522 | `eviction_ordinal` | query | - / evicted, displays, topology | |
+| 1534 | `take_eviction` | effect | W: evicted / R: evicted | |
+| 1540 | `restore_native_layout` | effect (borderline) | W: systems, native / R: topology, floats, native plan | (carries out the core's plan; reselects the focused window if restored, a small rule of its own) |
+| 1599 | `suspend_window` | effect (borderline) | W: systems, floats focus / R: topology, floats | (clears focus of a suspended window itself) |
+| 1618 | `remove_window_internal` | effect (borderline) | W: systems, floats, topology, persistence / R: - | (`preserve_floating` picks what is dropped, but the caller's event chose it) |
+| 1644 | `remove_window_layout_membership` | effect | W: systems, workspace last focus / R: topology, floats | |
+| 1677 | `add_window_to_layout` | decision | W: floats, systems, constraints, native / R: topology, floats, layout_settings | floating vs tiled for an added window (floating layout un-floats it), whether its width is preserved, whether native memory restores |
+| 1738 | `preserve_scrolling_window_width` | effect | W: constraints / R: window store | |
+| 1755 | `remove_window_from_all_tiling_trees` | effect | W: systems / - | |
+| 1761 | `workspace_contains_window` | query | - / systems | |
+| 1770 | `active_workspace_contains_window` | query | - / topology, systems | |
+| 1785 | `projected_space_in` | query | - / topology, systems, floats | |
+| 1801 | `space_with_window` | query | - / topology | |
+| 1808 | `active_workspace_id_and_name` | query | - / topology | |
+| 1817 | `update_space_display` | decision | W: topology homes, displays, systems / R: topology, displays, persistence | which workspaces get this display as home (unplaced ones), Hold vs Follow for the display's last Space (unresolved saved Space) |
+| 1857 | `sync_scrolling_widths_for_space` | effect | W: systems / R: displays, layout_settings, topology | |
+| 1867 | `last_space_for_display_uuid` | query | - / displays | |
+| 1871 | `display_uuid_for_space` | query | - / displays | |
+| 1876 | `remap_space` | effect | W: topology, displays, native, floats, persistence / - | |
+| 1897 | `forget_workspace` | effect | W: native, floats, persistence / - | |
+| 1903 | `LayoutEngine::new` | glue | - / - | |
+| 1924 | `apply_app_rule_outcome` | effect (borderline) | W: floats, app-rule outcome / R: rule effects | (the rule effects decide float and frame; the engine maps them, incl. un-floating a was-floating window) |
+| 1947 | `apply_app_rule_resize` | effect | W: constraints, systems / R: topology, layout_settings | |
+| 1985 | `debug_tree` | glue | - / - | |
+| 1989 | `debug_tree_desc` | glue | - / topology, systems | |
+| 2020 | `normalize_event` | glue (borderline) | - / topology | (a WindowAdded's Space becomes its assigned workspace's: answered by the topology) |
+| 2035 | `handle_event` | glue | - / - | |
+| 2046 | `handle_event_inner` | decision | W: floats, constraints, systems, topology, native, evicted, persistence / R: topology, floats, systems, layout_settings | the event router: claimed windows ignored; an observed window's floating vs tiled, relocation, scrub, reselection, and workspace-focus request vs commit; WindowFocused's floating vs tiled write and selection preservation; AppClosed and resize handling |
+| 2438 | `handle_command` | decision | W: native, scroll_boundary, floats, systems, topology / R: topology, floats, systems, layout_settings | the command router: which commands forget native memory, floating toggle (re-add vs remove, frame), floating fullscreen, ToggleFocusFloating's target, Next/PrevWindow's cycle set and target, Ascend refusal when floating, MoveNode's cross-display spill and order, resize refusal when floating, scroll boundary accumulation |
+| 2995 | `calculate_layout` | effect | W: systems / R: topology, constraints, shadow_passes | |
+| 3021 | `calculate_layout_with_virtual_workspaces` | glue | - / - | |
+| 3047 | `calculate_layout_with_groups` | decision (borderline) | W: systems, floats positions / R: topology, floats, constraints, layout_settings, shadow_passes | floating frames: stored frame unless hidden, else centred on the screen; fullscreen frames by kind; hidden windows' parking; the layout pass itself is effect |
+| 3221 | `active_workspace_for_space_has_fullscreen` | query | - / topology, systems | |
+| 3234 | `workspace_has_fullscreen` | query | - / topology, systems, floats | |
+| 3253 | `collect_group_containers` | glue | - / - | |
+| 3265 | `logical_window_frames` | query | - / topology, systems, constraints | |
+| 3294 | `calculate_layout_for_workspace` | query | - / topology, systems, floats | |
+| 3320 | `selected_window` | query | - / topology, systems | |
+| 3329 | `handle_virtual_workspace_command` | decision | W: topology, floats focus, systems / R: topology, floats | the workspace command router: next/prev and "next"/"prev" names, which window a move takes (index or focused), no-op on same workspace, follow vs stay, focus after a move (moved window, first remaining, none), raise/focus after SetWorkspaceLayout |
+| 3597 | `workspaces` | glue | - / topology | |
+| 3599 | `workspaces_mut` | glue | W: topology / - | |
+| 3601 | `assign_window_with_app_info` | decision | W: topology (assignment, manage override), native, persistence / R: app_rules, persistence | a claimed window only gets its manage override; a persistence match cancels the rule's workspace; a reapplied workspace rule forgets native memory |
+| 3677 | `ensure_active_workspace_info` | decision (borderline) | W: topology / R: topology | a Space with no active workspace activates its first (index 0); a default the topology could own |
+| 3693 | `move_window_to_space` | decision | W: topology, systems, floats focus / R: topology | the destination workspace (target Space's active one) and whether the moved window is focused (placeable) |
+| 3755 | `move_active_workspace_to_space` | decision | W: topology, systems, native, evicted / R: topology, displays, floats | per-display mode: move windows into the same-index workspace there (and focus), else transfer the workspace object |
+| 3828 | `app_rule_names_workspace` | query | - / app_rules | |
+| 3834 | `transfer_workspace` | effect (borderline) | W: topology, native, systems, displays, evicted / R: topology, floats | (an Explicit transfer re-lays and re-places the source Space; transferred windows only across Spaces) |
+| 3884 | `ensure_workspace_layouts` | effect | W: topology, systems / - | |
+| 3894 | `relocate_window_to_workspace` | decision | W: topology, systems, floats, native, evicted, constraints / R: topology, floats, systems, layout_settings | whether a relocation is allowed (ownership, Space), whether the window stays floating (policy, floating layouts, direction), width preservation, suspend vs resume, focus clear |
+| 3999 | `workspace_name` | query | - / topology | |
+| 4011 | `is_window_floating` | query | - / floats, systems | |
+| 4020 | `prepare_window_placement` | effect | W: floats or floating system / R: topology, floats | |
+| 4033 | `store_floating_position` | effect | W: floating system or floats / R: systems | |
+| 4046 | `get_floating_position` | query | - / systems, floats | |
+| 4057 | `workspace_floating_positions` | query | - / floats | |
+| 4064 | `remove_floating_position` | effect | W: floats / - | |
+| 4070 | `retire_window` | effect | W: constraints / - | |
+| 4076 | `constraint_records` | query | - / constraints | |
+| 4084 | `observed_size` | glue | - / - | |
+| 4101 | `has_window_constraints` | query | - / constraints | |
+| 4105 | `transfer_persistent_window_identity` | effect | W: evicted, native, systems, topology, floats, constraints / R: floats | |
+| 4129 | `store_floating_window_positions` | effect | W: floats or floating systems / R: topology | |
+
+- Next: E1 in the order above, after the lead's review of this inventory.
 
 **Pruning (the lead, 2026-11-26):** at a milestone, delete only what no future build reuses:
 stale `target/roc-build` keys (all but the current sources', which the build script's line
