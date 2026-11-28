@@ -1044,6 +1044,7 @@ Boundary := [].{
 		Fullscreen(FloatFullscreenSet),
 		FloatingFocus(MaybeWord),
 		Focused(MaybeWord),
+		FocusLeft(U64),
 		Replaced(FloatPair),
 		AppQuit(I32),
 		FloatingTaken,

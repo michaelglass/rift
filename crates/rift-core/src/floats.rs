@@ -46,6 +46,8 @@ pub enum FloatsEvent<W, P, Ws, F> {
     FloatingFocus(Option<W>),
     /// The engine's focused window, or none.
     Focused(Option<W>),
+    /// `window` lost focus (suspended or removed): the engine's focus goes, if it was on it.
+    FocusLeft(W),
     /// `from` has a new identity, `to`: floating, fullscreen, the floating focus and saved frames
     /// follow it, replacing whatever `to` had.
     Replaced { from: W, to: W },
@@ -135,6 +137,11 @@ where
             }
             FloatsEvent::FloatingFocus(window) => self.floating_focus = window,
             FloatsEvent::Focused(window) => self.focused = window,
+            FloatsEvent::FocusLeft(window) => {
+                if self.focused == Some(window) {
+                    self.focused = None;
+                }
+            }
             FloatsEvent::Replaced { from, to } => {
                 if from == to {
                     return;
@@ -373,6 +380,12 @@ mod tests {
         m.step(FloatsEvent::Focused(Some(a)));
         assert_eq!(m.focused(), Some(a));
         m.step(FloatsEvent::Focused(None));
+        // Focus leaving a window takes it only from that window.
+        m.step(FloatsEvent::Focused(Some(a)));
+        m.step(FloatsEvent::FocusLeft(w(1, 2)));
+        assert_eq!(m.focused(), Some(a));
+        m.step(FloatsEvent::FocusLeft(a));
+        assert_eq!(m.focused(), None);
         assert_eq!(m.focused(), None);
     }
 }

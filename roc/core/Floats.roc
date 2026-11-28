@@ -25,6 +25,7 @@ Floats := [].{
 				}
 			FloatingFocus(window) => { ..kept, floating_focus: window }
 			Focused(window) => { ..kept, focused: window }
+			FocusLeft(window) => if kept.focused == Some(window) { ..kept, focused: Nothing } else kept
 			Replaced(pair) => if pair.from == pair.to kept else replaced(kept, pair.from, pair.to)
 			AppQuit(pid) => app_quit(kept, pid)
 			FloatingTaken => { ..kept, floating: Set.empty() }

@@ -3,6 +3,7 @@ use std::sync::Arc;
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use rift_core::display_memory::{DisplayEvent, LastSpace};
 use rift_core::evictions::EvictionEvent;
+use rift_core::focus::{Committed, Eligible, FocusRecord, PastTheEdge, WorkspaceFocus};
 use rift_core::native_memory::{Candidate, Current, Held as _, MemoryAnswer, MemoryEvent};
 use rift_protocol::{FloatingWindowSize, FloatingWindowSizePreset, ToggleWindowFloatingOptions};
 use serde::{Deserialize, Serialize};
@@ -54,10 +55,6 @@ impl DropPreview {
             action
         }
     }
-}
-
-fn interval_gap(a_min: f64, a_max: f64, b_min: f64, b_max: f64) -> f64 {
-    (b_min - a_max).max(a_min - b_max).max(0.0)
 }
 
 fn requested_floating_frame(
@@ -988,31 +985,29 @@ impl LayoutEngine {
         workspace_id: VirtualWorkspaceId,
         preferred_focus_window: Option<WindowId>,
     ) -> Option<WindowId> {
-        let belongs = |wid: &WindowId| {
-            window_store.workspace_for_window(*wid) == Some(workspace_id)
-                && !window_store.is_temporarily_unavailable(*wid)
+        let eligible = |window: WindowId| Eligible {
+            window,
+            belongs: window_store.workspace_for_window(window) == Some(workspace_id)
+                && !window_store.is_temporarily_unavailable(window),
         };
         let workspace = &self.workspaces[workspace_id];
-        preferred_focus_window
-            .filter(belongs)
-            .or_else(|| workspace.last_focused().filter(belongs))
-            .or_else(|| {
-                let layout = workspace.active_layout()?;
-                workspace.layout_system.selected_window(layout).filter(belongs).or_else(|| {
-                    workspace
-                        .layout_system
-                        .windows(layout, WindowQuery::Visible)
-                        .into_iter()
-                        .find(belongs)
-                })
-            })
-            .or_else(|| {
-                let floating = self.active_floating_windows_in_workspace(window_store, space);
-                self.floats
-                    .last_focus()
-                    .filter(|wid| floating.contains(wid))
-                    .or_else(|| floating.first().copied())
-            })
+        let layout = workspace.active_layout();
+        let facts = WorkspaceFocus {
+            preferred: preferred_focus_window.map(eligible),
+            last_focused: workspace.last_focused().map(eligible),
+            selected: layout
+                .and_then(|layout| workspace.layout_system.selected_window(layout))
+                .map(eligible),
+            visible: layout
+                .map(|layout| workspace.layout_system.windows(layout, WindowQuery::Visible))
+                .unwrap_or_default()
+                .into_iter()
+                .map(eligible)
+                .collect(),
+            floating: self.active_floating_windows_in_workspace(window_store, space),
+            floating_last_focus: self.floats.last_focus(),
+        };
+        rift_core::focus::workspace_focus(&facts)
     }
 
     pub(crate) fn commit_workspace_focus(
@@ -1021,40 +1016,55 @@ impl LayoutEngine {
         space: SpaceId,
         focus_window: Option<WindowId>,
     ) {
-        let Some(workspace_id) =
-            self.workspaces.reading(window_store.read()).active_workspace(space)
-        else {
-            self.floats.set_focused(None);
-            return;
-        };
-
-        let focus_window = focus_window.filter(|wid| {
-            window_store.read().workspace_for_window(*wid) == Some(workspace_id)
-                && !window_store.is_temporarily_unavailable(*wid)
+        let workspace = self.workspaces.reading(window_store.read()).active_workspace(space);
+        let focus = focus_window.map(|window| Committed {
+            window,
+            belongs: workspace.is_some()
+                && window_store.read().workspace_for_window(window) == workspace
+                && !window_store.is_temporarily_unavailable(window),
+            floating: self.floats.is_floating(window),
         });
-
-        if let Some(wid) = focus_window {
-            self.floats.set_focused(Some(wid));
-            self.workspaces.set_last_focused_window(
-                &window_store.core,
-                space,
-                workspace_id,
-                Some(wid),
-            );
-            if self.floats.is_floating(wid) {
-                self.floats.set_last_focus(Some(wid));
-            } else if let Some(layout) =
-                self.workspaces.reading(window_store.read()).active_layout(space, workspace_id)
-            {
-                let _ = self.workspaces[workspace_id]
-                    .layout_system
-                    .focus(layout, Focus::Select(wid))
-                    .handled;
+        match (
+            rift_core::focus::focus_record(workspace.is_some(), focus),
+            workspace,
+        ) {
+            (FocusRecord::NoWorkspace, _) | (_, None) => self.floats.set_focused(None),
+            (FocusRecord::Cleared, Some(workspace_id)) => {
+                self.floats.set_focused(None);
+                self.workspaces.set_last_focused_window(
+                    window_store.core,
+                    space,
+                    workspace_id,
+                    None,
+                );
             }
-        } else {
-            self.floats.set_focused(None);
-            self.workspaces
-                .set_last_focused_window(&window_store.core, space, workspace_id, None);
+            (FocusRecord::Floating(wid), Some(workspace_id)) => {
+                self.floats.set_focused(Some(wid));
+                self.workspaces.set_last_focused_window(
+                    window_store.core,
+                    space,
+                    workspace_id,
+                    Some(wid),
+                );
+                self.floats.set_last_focus(Some(wid));
+            }
+            (FocusRecord::Tiled(wid), Some(workspace_id)) => {
+                self.floats.set_focused(Some(wid));
+                self.workspaces.set_last_focused_window(
+                    window_store.core,
+                    space,
+                    workspace_id,
+                    Some(wid),
+                );
+                if let Some(layout) =
+                    self.workspaces.reading(window_store.read()).active_layout(space, workspace_id)
+                {
+                    let _ = self.workspaces[workspace_id]
+                        .layout_system
+                        .focus(layout, Focus::Select(wid))
+                        .handled;
+                }
+            }
         }
     }
 
@@ -1203,11 +1213,18 @@ impl LayoutEngine {
         layout: LayoutId,
         response: &EventResponse,
     ) {
-        if let Some(wid) = response.focus_window {
-            self.floats.set_focused(Some(wid));
-            if self.floats.is_floating(wid) {
-                self.floats.set_last_focus(Some(wid));
-            } else {
+        let Some(window) = response.focus_window else {
+            return;
+        };
+        self.floats.set_focused(Some(window));
+        let committed = Committed {
+            window,
+            belongs: true,
+            floating: self.floats.is_floating(window),
+        };
+        match rift_core::focus::focus_record(true, Some(committed)) {
+            FocusRecord::Floating(wid) => self.floats.set_last_focus(Some(wid)),
+            FocusRecord::Tiled(wid) => {
                 let _ =
                     self.workspaces[ws_id].layout_system.focus(layout, Focus::Select(wid)).handled;
                 self.workspaces.set_last_focused_window(
@@ -1216,6 +1233,9 @@ impl LayoutEngine {
                     ws_id,
                     Some(wid),
                 );
+            }
+            FocusRecord::NoWorkspace | FocusRecord::Cleared => {
+                unreachable!("a window that belongs, with a workspace, is recorded")
             }
         }
     }
@@ -1267,22 +1287,13 @@ impl LayoutEngine {
 
         if is_floating {
             let windows = self.active_floating_windows_in_workspace(window_store.read(), space);
-            if matches!(direction, Direction::Left | Direction::Right)
-                && windows.len() > 1
-                && let Some(index) = windows.iter().position(|&w| Some(w) == self.floats.focused())
-            {
-                let step = if direction == Direction::Left {
-                    windows.len() - 1
-                } else {
-                    1
-                };
-                return commit(
-                    self,
-                    window_store,
-                    current,
-                    windows[(index + step) % windows.len()],
-                    Vec::new(),
-                );
+            let cycled = rift_core::focus::floating_cycle(
+                &windows,
+                self.floats.focused(),
+                super::systems::core_direction(direction),
+            );
+            if let Some(window) = cycled {
+                return commit(self, window_store, current, window, Vec::new());
             }
             let tiled = visible(self, window_store.read(), current);
             return match tiled.first().copied() {
@@ -1304,11 +1315,12 @@ impl LayoutEngine {
         if let Some(window) = previous {
             self.workspaces[ws_id].layout_system.focus(layout, Focus::Select(window));
         }
-        if matches!(direction, Direction::Left | Direction::Right)
-            && matches!(
-                self.workspaces[ws_id].layout_system,
-                LayoutSystemKind::Scrolling(_)
-            )
+        let scrolling = matches!(
+            self.workspaces[ws_id].layout_system,
+            LayoutSystemKind::Scrolling(_)
+        );
+        if rift_core::focus::past_the_edge(super::systems::core_direction(direction), scrolling)
+            == PastTheEdge::Stop
         {
             return EventResponse::default();
         }
@@ -1327,21 +1339,21 @@ impl LayoutEngine {
             let raise = visible(self, window_store.read(), target);
             let directional =
                 self.workspaces[ws].layout_system.window_in_direction(layout, direction);
-            if let Some(window) = self
-                .filter_active_workspace_window(window_store.read(), destination, directional)
-                .or_else(|| raise.first().copied())
-            {
+            let directional =
+                self.filter_active_workspace_window(window_store.read(), destination, directional);
+            if let Some(window) = rift_core::focus::entry_window(directional, &raise) {
                 self.workspaces[ws].layout_system.focus(layout, Focus::Select(window));
                 return commit(self, window_store, target, window, raise);
             }
         }
 
-        let fallback = self
-            .active_floating_windows_in_workspace(window_store.read(), space)
-            .first()
-            .copied()
-            .or_else(|| self.filter_active_workspace_window(window_store.read(), space, previous))
-            .or_else(|| visible(self, window_store.read(), current).first().copied());
+        let fallback = rift_core::focus::focus_fallback(
+            self.active_floating_windows_in_workspace(window_store.read(), space)
+                .first()
+                .copied(),
+            self.filter_active_workspace_window(window_store.read(), space, previous),
+            visible(self, window_store.read(), current).first().copied(),
+        );
         match fallback {
             Some(window) => commit(self, window_store, current, window, Vec::new()),
             None => EventResponse::default(),
@@ -1355,64 +1367,17 @@ impl LayoutEngine {
         visible_spaces: &[SpaceId],
         space_frames: &HashMap<SpaceId, CGRect>,
     ) -> Option<SpaceId> {
-        let current = *space_frames.get(&current_space)?;
-        let mut best: Option<(f64, f64, SpaceId)> = None;
-        for &space in visible_spaces {
-            if space == current_space {
-                continue;
-            }
-            let Some(candidate) = space_frames.get(&space) else {
-                continue;
-            };
-            let (primary_gap, orth_gap) = match direction {
-                Direction::Left => (
-                    current.min().x - candidate.max().x,
-                    interval_gap(
-                        current.min().y,
-                        current.max().y,
-                        candidate.min().y,
-                        candidate.max().y,
-                    ),
-                ),
-                Direction::Right => (
-                    candidate.min().x - current.max().x,
-                    interval_gap(
-                        current.min().y,
-                        current.max().y,
-                        candidate.min().y,
-                        candidate.max().y,
-                    ),
-                ),
-                Direction::Up => (
-                    current.min().y - candidate.max().y,
-                    interval_gap(
-                        current.min().x,
-                        current.max().x,
-                        candidate.min().x,
-                        candidate.max().x,
-                    ),
-                ),
-                Direction::Down => (
-                    candidate.min().y - current.max().y,
-                    interval_gap(
-                        current.min().x,
-                        current.max().x,
-                        candidate.min().x,
-                        candidate.max().x,
-                    ),
-                ),
-            };
-            if primary_gap < 0.0 {
-                continue;
-            }
-            // Prefer aligned displays, then the nearest edge in the requested direction.
-            if best.as_ref().is_none_or(|&(orth, primary, _)| {
-                orth_gap < orth || (orth_gap == orth && primary_gap < primary)
-            }) {
-                best = Some((orth_gap, primary_gap, space));
-            }
-        }
-        best.map(|(_, _, space)| space)
+        use crate::layout_engine::core_rect;
+        let current = core_rect(*space_frames.get(&current_space)?);
+        let candidates: Vec<_> = (visible_spaces.iter())
+            .filter(|&&space| space != current_space)
+            .filter_map(|&space| Some((space, core_rect(*space_frames.get(&space)?))))
+            .collect();
+        rift_core::focus::space_in_direction(
+            current,
+            super::systems::core_direction(direction),
+            &candidates,
+        )
     }
 
     // Explicit placement edits revoke recovery even when logical membership is unchanged.
@@ -1607,9 +1572,7 @@ impl LayoutEngine {
             let changed = (workspace.layout_system.set_window_participation(wid, false)
                 && projected)
                 || self.is_floating_active(window_store, space, wid);
-            if self.floats.focused() == Some(wid) {
-                self.floats.set_focused(None);
-            }
+            self.floats.focus_left(wid);
             return changed;
         }
         false
@@ -1634,9 +1597,7 @@ impl LayoutEngine {
             self.forget_persisted_window(wid);
         }
 
-        if self.floats.focused() == Some(wid) {
-            self.floats.set_focused(None);
-        }
+        self.floats.focus_left(wid);
 
         removal.is_some()
     }
@@ -5166,6 +5127,42 @@ mod tests {
         let workspace = engine.workspaces.reading(store.view()).active_workspace(space).unwrap();
         engine.remember_native_departure(store.view(), windows[0]);
         (engine, store, workspace, windows)
+    }
+
+    /// A workspace's focus never goes to a window that is unavailable (minimized), even asked for.
+    #[test]
+    fn a_workspace_focus_skips_an_unavailable_window() {
+        let (mut engine, mut store, workspace, [a, b, c]) = departed_workspace();
+        let space = SpaceId::new(97);
+        store.view_mut().set_minimized(a, true);
+        let response = engine.activate_workspace(&mut store.view_mut(), space, workspace, Some(a));
+        let focused = engine.preferred_focus_for_workspace(store.view(), space, workspace, Some(a));
+        assert_ne!(focused, Some(a));
+        assert!(focused == Some(b) || focused == Some(c), "{focused:?}");
+        let _ = response;
+    }
+
+    /// A focus committed to a window of another workspace is not kept: the focus is cleared.
+    #[test]
+    fn a_committed_focus_of_another_workspace_is_cleared() {
+        let (mut engine, mut store, workspace, [a, _, c]) = departed_workspace();
+        let space = SpaceId::new(97);
+        engine.commit_workspace_focus(&mut store.view_mut(), space, Some(a));
+        assert_eq!(engine.floats.focused(), Some(a));
+        let other = engine
+            .workspaces
+            .reading(store.view())
+            .workspaces_on(space)
+            .find(|&id| id != workspace)
+            .expect("a second workspace on the Space");
+        assert!(engine.workspaces.assign_window_to_workspace(
+            &mut store.view_mut(),
+            space,
+            c,
+            other
+        ));
+        engine.commit_workspace_focus(&mut store.view_mut(), space, Some(c));
+        assert_eq!(engine.floats.focused(), None);
     }
 
     /// A native snapshot's windows, in window order.

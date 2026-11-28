@@ -1127,7 +1127,48 @@ last; (b) marks a borderline one):
 | 4105 | `transfer_persistent_window_identity` | effect | W: evicted, native, systems, topology, floats, constraints / R: floats | |
 | 4129 | `store_floating_window_positions` | effect | W: floats or floating systems / R: topology | |
 
-- Next: E1 in the order above, after the lead's review of this inventory.
+**The lead's review (2026-11-28):** approved, strict classing kept. **E1f stays in E1:** mode
+switching and the toggles are behaviour, and the engine target needs them. **The config slice
+keeps what is left:** parsing and interpreting config files into typed settings, and
+`active_layout_mode_at`. The order stands: focus, workspace switching, placement, displays,
+floating geometry, mode, then command and event routing. After E1e, judge whether the named
+follow-up (Geometry as a pure core function the camera reads, removing the `Spans` round trip)
+is small enough to do there; say which in the E1e report. E1c's placement plan is a sum type per
+kind of outcome (a plain add, a relocation, a drop with a target), never one struct with optional
+fields.
+
+**E1a-1 (2026-11-28): the engine's focus choices are core functions** (`rift_core::focus`,
+beside the reactor's focus decisions), the engine gathering facts and carrying out the answers:
+- `workspace_focus` (was `preferred_focus_for_workspace`): the window asked for, else the last
+  focused, else the layout's selection, else its first visible window, each only if it belongs
+  (in the workspace and available), else the last floating focus if still active, else the first
+  active floating window. The facts are `WorkspaceFocus` (each candidate an `Eligible`).
+- `focus_record` (`commit_workspace_focus`, `apply_focus_response`): `FocusRecord::{NoWorkspace,
+  Cleared, Floating, Tiled}`, where a committed focus is recorded; the two callers' effects for
+  each answer are as they were.
+- `floating_cycle`, `past_the_edge` (`PastTheEdge::{Stop, NextSpace}`: a strip ends left and
+  right), `entry_window` and `focus_fallback` (`move_focus_internal`'s choices; the layout system
+  still answers the directional focus itself), and `space_in_direction` (was
+  `next_space_for_direction`, the same arithmetic).
+- `FloatsEvent::FocusLeft(w)`: a window that is suspended or removed takes the focus with it only
+  if it held it, in the floats core (Rust and Roc) instead of the engine comparing and clearing.
+- `focus_changes_geometry` is reclassed as a **query**: it asks each layout system about itself
+  (its kind, whether its selection is stacked); a core function would only wrap one `or`.
+- Tests for what nothing tested: a workspace's focus skips an unavailable window, even asked
+  for; a focus committed to another workspace's window is cleared. Plants 11/11: in the core, the
+  last focused before the window asked for, a floating last focus no longer active, a floating
+  window recorded as tiled, a focus that does not belong kept, the floating cycle reversed, a
+  strip stopping vertical focus, the nearest Space before the best aligned, the fallback order,
+  focus leaving any window clearing it; in the engine, an unavailable window taking a workspace's
+  focus, another workspace's window kept.
+
+- **The gate's second catch, and a flaw it showed:** the rewrite added a third needless
+  `&window_store.core` (one per recorded branch); fixed, with the two others in the same code, so
+  the baseline shrank to 291. The gate keyed every `pub(crate)` item as "pub" (it cut the line at
+  the first parenthesis, the visibility's); it now strips the visibility first. The baseline was
+  re-keyed once (24 entries got their item's name; the count is unchanged by the re-key).
+
+- Next: E1a-2 (the focus choices in Roc, deciding).
 
 **Pruning (the lead, 2026-11-26):** at a milestone, delete only what no future build reuses:
 stale `target/roc-build` keys (all but the current sources', which the build script's line

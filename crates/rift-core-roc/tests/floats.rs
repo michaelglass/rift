@@ -55,6 +55,7 @@ impl Rng {
                 _ => Some(FullscreenKind::WithinGaps),
             }),
             7..=14 => FloatsEvent::FloatingFocus(self.maybe_window()),
+            15 if self.chance(50) => FloatsEvent::FocusLeft(self.window()),
             15 => FloatsEvent::Focused(self.maybe_window()),
             16 | 17 => FloatsEvent::Replaced {
                 from: self.window(),

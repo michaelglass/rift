@@ -4536,6 +4536,11 @@ fn floats_event(event: FloatsEvent<u64, i32, u64, Rect>) -> abi::BoundaryFloatsE
             BoundaryFloatsEventPayload.focused(maybe_word(w)),
             Tag::Focused
         ),
+        FloatsEvent::FocusLeft(w) => union!(
+            BoundaryFloatsEvent,
+            BoundaryFloatsEventPayload.focus_left(w),
+            Tag::FocusLeft
+        ),
         FloatsEvent::Replaced { from, to } => union!(
             BoundaryFloatsEvent,
             BoundaryFloatsEventPayload.replaced(abi::BoundaryFloatPair { from, to }),

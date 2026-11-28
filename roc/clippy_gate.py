@@ -41,7 +41,9 @@ def item_of(path, line, cache={}):
         cache[path] = lines
     for text in reversed(lines[:line]):
         if ITEM.match(text):
-            head = re.split(r"[{(=;]", text.strip(), maxsplit=1)[0]
+            # The visibility's parentheses are not the item's: strip it before cutting at one.
+            bare = re.sub(r"^\s*pub(?:\([^)]*\))?\s+", "", text)
+            head = re.split(r"[{(=;]", bare.strip(), maxsplit=1)[0]
             return " ".join(head.split())[:100]
     return "(top)"
 

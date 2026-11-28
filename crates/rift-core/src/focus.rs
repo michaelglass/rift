@@ -2,6 +2,7 @@
 //! platform asks and acts (making a window key, warping, refocusing); these decide, asking for
 //! a fact only when the decision needs it.
 
+use crate::layout::bsp_tree::Direction;
 use crate::plain::Rect;
 
 /// A window or an app leaving the layout.
@@ -688,8 +689,283 @@ pub mod plain {
     }
 }
 
+// ---------------------------------------------------------------------------------------------
+// The layout engine's focus choices (engine slice E1a): which window a workspace focuses, where a
+// committed focus is recorded, directional focus past a layout's edge, and the Space in a
+// direction. The engine gathers the facts, and carries the answers out.
+
+/// A window a workspace could focus, and whether it may: in the workspace, and available.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Eligible<W> {
+    pub window: W,
+    pub belongs: bool,
+}
+
+/// What a workspace's focus is chosen from, in the order it is tried.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceFocus<W> {
+    /// The window asked for.
+    pub preferred: Option<Eligible<W>>,
+    /// The workspace's last focused window.
+    pub last_focused: Option<Eligible<W>>,
+    /// Its layout's selection (none without a layout).
+    pub selected: Option<Eligible<W>>,
+    /// Its layout's visible windows, in order (none without a layout).
+    pub visible: Vec<Eligible<W>>,
+    /// Its active floating windows, in order.
+    pub floating: Vec<W>,
+    /// The last floating window focused.
+    pub floating_last_focus: Option<W>,
+}
+
+/// The window a workspace focuses: the one asked for, else its last focused, else its layout's
+/// selection, else its first visible window (each only if it belongs), else its last focused
+/// floating window if still active, else its first active floating window.
+pub fn workspace_focus<W: Copy + PartialEq>(facts: &WorkspaceFocus<W>) -> Option<W> {
+    let belonging = |e: &Option<Eligible<W>>| e.filter(|e| e.belongs).map(|e| e.window);
+    belonging(&facts.preferred)
+        .or_else(|| belonging(&facts.last_focused))
+        .or_else(|| belonging(&facts.selected))
+        .or_else(|| facts.visible.iter().find(|e| e.belongs).map(|e| e.window))
+        .or_else(|| facts.floating_last_focus.filter(|w| facts.floating.contains(w)))
+        .or_else(|| facts.floating.first().copied())
+}
+
+/// A window a focus is committed to, with whether it may keep it and whether it floats.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Committed<W> {
+    pub window: W,
+    pub belongs: bool,
+    pub floating: bool,
+}
+
+/// Where a committed focus is recorded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FocusRecord<W> {
+    /// The Space has no active workspace: the focus is cleared, nothing recorded.
+    NoWorkspace,
+    /// No window may keep it: cleared, and the workspace's last focus with it.
+    Cleared,
+    /// A floating window: the floating focus records it.
+    Floating(W),
+    /// A tiled window: its layout selects it.
+    Tiled(W),
+}
+
+/// Where a focus committed on a Space is recorded: `workspace` says whether the Space has an
+/// active workspace, `focus` the window (if any).
+pub fn focus_record<W: Copy>(workspace: bool, focus: Option<Committed<W>>) -> FocusRecord<W> {
+    if !workspace {
+        return FocusRecord::NoWorkspace;
+    }
+    match focus.filter(|f| f.belongs) {
+        None => FocusRecord::Cleared,
+        Some(f) if f.floating => FocusRecord::Floating(f.window),
+        Some(f) => FocusRecord::Tiled(f.window),
+    }
+}
+
+/// The next active floating window left or right of the focused one, cycling; none for another
+/// direction, for fewer than two, or when the focused window is not among them.
+pub fn floating_cycle<W: Copy + PartialEq>(
+    floating: &[W],
+    focused: Option<W>,
+    direction: Direction,
+) -> Option<W> {
+    if !matches!(direction, Direction::Left | Direction::Right) || floating.len() < 2 {
+        return None;
+    }
+    let index = floating.iter().position(|&w| Some(w) == focused)?;
+    let step = if direction == Direction::Left {
+        floating.len() - 1
+    } else {
+        1
+    };
+    Some(floating[(index + step) % floating.len()])
+}
+
+/// What directional focus does once the layout found no window that way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PastTheEdge {
+    /// Nothing: a scrolling strip ends left and right.
+    Stop,
+    /// Into the Space in that direction.
+    NextSpace,
+}
+
+/// What directional focus does past a layout's edge (`scrolling`: the layout is a strip).
+pub fn past_the_edge(direction: Direction, scrolling: bool) -> PastTheEdge {
+    if scrolling && matches!(direction, Direction::Left | Direction::Right) {
+        PastTheEdge::Stop
+    } else {
+        PastTheEdge::NextSpace
+    }
+}
+
+/// The window focus enters another Space at: the one its layout has in the direction of travel,
+/// else its first visible window.
+pub fn entry_window<W: Copy>(directional: Option<W>, visible: &[W]) -> Option<W> {
+    directional.or_else(|| visible.first().copied())
+}
+
+/// The window focus falls back to on its own Space when it went nowhere: the first active
+/// floating window, else the window the layout had selected, else its first visible window.
+pub fn focus_fallback<W: Copy>(
+    first_floating: Option<W>,
+    previous: Option<W>,
+    first_visible: Option<W>,
+) -> Option<W> {
+    first_floating.or(previous).or(first_visible)
+}
+
+/// The visible Space in `direction` from the one at `current`: among those wholly that way, the
+/// best aligned (smallest gap across the direction), then the nearest edge.
+pub fn space_in_direction<S: Copy>(
+    current: Rect,
+    direction: Direction,
+    candidates: &[(S, Rect)],
+) -> Option<S> {
+    let gap = |a_min: f64, a_max: f64, b_min: f64, b_max: f64| {
+        (b_min - a_max).max(a_min - b_max).max(0.0)
+    };
+    let (cx0, cy0, cx1, cy1) = (
+        current.x,
+        current.y,
+        current.x + current.w,
+        current.y + current.h,
+    );
+    let mut best: Option<(f64, f64, S)> = None;
+    for &(space, c) in candidates {
+        let (x0, y0, x1, y1) = (c.x, c.y, c.x + c.w, c.y + c.h);
+        let (primary, across) = match direction {
+            Direction::Left => (cx0 - x1, gap(cy0, cy1, y0, y1)),
+            Direction::Right => (x0 - cx1, gap(cy0, cy1, y0, y1)),
+            Direction::Up => (cy0 - y1, gap(cx0, cx1, x0, x1)),
+            Direction::Down => (y0 - cy1, gap(cx0, cx1, x0, x1)),
+        };
+        if primary < 0.0 {
+            continue;
+        }
+        // Prefer aligned displays, then the nearest edge in the requested direction.
+        if best
+            .as_ref()
+            .is_none_or(|&(a, p, _)| across < a || (across == a && primary < p))
+        {
+            best = Some((across, primary, space));
+        }
+    }
+    best.map(|(_, _, space)| space)
+}
+
 #[cfg(test)]
 mod tests {
+    // The layout engine's focus choices.
+
+    fn eligible(window: u32, belongs: bool) -> Option<Eligible<u32>> {
+        Some(Eligible { window, belongs })
+    }
+
+    #[test]
+    fn a_workspace_focuses_the_first_eligible_window_in_order() {
+        let mut f = WorkspaceFocus {
+            preferred: eligible(1, false),
+            last_focused: eligible(2, false),
+            selected: eligible(3, false),
+            visible: vec![Eligible { window: 4, belongs: false }, Eligible {
+                window: 5,
+                belongs: true,
+            }],
+            floating: vec![6, 7],
+            floating_last_focus: Some(7),
+        };
+        assert_eq!(workspace_focus(&f), Some(5));
+        f.selected = eligible(3, true);
+        assert_eq!(workspace_focus(&f), Some(3));
+        f.last_focused = eligible(2, true);
+        assert_eq!(workspace_focus(&f), Some(2));
+        f.preferred = eligible(1, true);
+        assert_eq!(workspace_focus(&f), Some(1));
+        let mut floating = WorkspaceFocus {
+            preferred: None,
+            last_focused: None,
+            selected: None,
+            visible: vec![],
+            floating: vec![6, 7],
+            floating_last_focus: Some(7),
+        };
+        assert_eq!(workspace_focus(&floating), Some(7));
+        floating.floating_last_focus = Some(9);
+        assert_eq!(workspace_focus(&floating), Some(6));
+        floating.floating.clear();
+        assert_eq!(workspace_focus(&floating), None);
+    }
+
+    #[test]
+    fn a_committed_focus_is_recorded_by_whether_it_floats() {
+        let c = |belongs, floating| {
+            Some(Committed {
+                window: 1u32,
+                belongs,
+                floating,
+            })
+        };
+        assert_eq!(focus_record(false, c(true, false)), FocusRecord::NoWorkspace);
+        assert_eq!(focus_record::<u32>(true, None), FocusRecord::Cleared);
+        assert_eq!(focus_record(true, c(false, false)), FocusRecord::Cleared);
+        assert_eq!(focus_record(true, c(true, true)), FocusRecord::Floating(1));
+        assert_eq!(focus_record(true, c(true, false)), FocusRecord::Tiled(1));
+    }
+
+    #[test]
+    fn floating_focus_cycles_left_and_right() {
+        let w = [1u32, 2, 3];
+        assert_eq!(floating_cycle(&w, Some(1), Direction::Right), Some(2));
+        assert_eq!(floating_cycle(&w, Some(1), Direction::Left), Some(3));
+        assert_eq!(floating_cycle(&w, Some(3), Direction::Right), Some(1));
+        assert_eq!(floating_cycle(&w, Some(1), Direction::Up), None);
+        assert_eq!(floating_cycle(&w, Some(9), Direction::Right), None);
+        assert_eq!(floating_cycle(&[1u32], Some(1), Direction::Right), None);
+    }
+
+    #[test]
+    fn past_a_strips_end_focus_stops_and_otherwise_crosses_spaces() {
+        assert_eq!(past_the_edge(Direction::Left, true), PastTheEdge::Stop);
+        assert_eq!(past_the_edge(Direction::Up, true), PastTheEdge::NextSpace);
+        assert_eq!(past_the_edge(Direction::Left, false), PastTheEdge::NextSpace);
+        assert_eq!(entry_window(Some(1u32), &[2]), Some(1));
+        assert_eq!(entry_window(None, &[2u32, 3]), Some(2));
+        assert_eq!(focus_fallback(Some(1u32), Some(2), Some(3)), Some(1));
+        assert_eq!(focus_fallback(None, Some(2u32), Some(3)), Some(2));
+        assert_eq!(focus_fallback(None, None, Some(3u32)), Some(3));
+    }
+
+    #[test]
+    fn the_space_in_a_direction_is_the_best_aligned_then_the_nearest() {
+        let r = |x: f64, y: f64| Rect { x, y, w: 100.0, h: 100.0 };
+        let current = r(0.0, 0.0);
+        let candidates = [
+            (1u32, r(300.0, 0.0)),
+            (2, r(150.0, 80.0)),
+            (3, r(-200.0, 0.0)),
+            (4, r(120.0, 0.0)),
+        ];
+        assert_eq!(
+            space_in_direction(current, Direction::Right, &candidates),
+            Some(4)
+        );
+        assert_eq!(
+            space_in_direction(current, Direction::Left, &candidates),
+            Some(3)
+        );
+        assert_eq!(space_in_direction(current, Direction::Down, &candidates), None);
+        // A misaligned nearer display loses to an aligned farther one.
+        let candidates = [(1u32, r(300.0, 0.0)), (2, r(150.0, 150.0))];
+        assert_eq!(
+            space_in_direction(current, Direction::Right, &candidates),
+            Some(1)
+        );
+    }
+
     use super::*;
 
     /// A window is (app, index).

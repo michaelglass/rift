@@ -126,6 +126,11 @@ impl EngineFloats {
         self.step(FloatsEvent::Focused(window));
     }
 
+    /// `window` lost focus (suspended or removed): the focus goes, if it was on it.
+    pub(crate) fn focus_left(&mut self, window: WindowId) {
+        self.step(FloatsEvent::FocusLeft(window));
+    }
+
     /// `pid` quit: its windows' floating state and frames go.
     pub(crate) fn app_quit(&mut self, pid: pid_t) { self.step(FloatsEvent::AppQuit(pid)); }
 

@@ -1555,6 +1555,7 @@ fn words(
         E::Fullscreen(w, k) => E::Fullscreen(w.word(), k),
         E::FloatingFocus(w) => E::FloatingFocus(w.map(Word::word)),
         E::Focused(w) => E::Focused(w.map(Word::word)),
+        E::FocusLeft(w) => E::FocusLeft(w.word()),
         E::Replaced { from, to } => E::Replaced {
             from: from.word(),
             to: to.word(),
