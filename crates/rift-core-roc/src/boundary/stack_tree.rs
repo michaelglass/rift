@@ -12,8 +12,9 @@ use rift_core::layout::stack_tree::{
 use rift_core::plain::{Rect, WindowId};
 
 use super::{
-    frames, from_maybe_word, from_orientation, gaps, insertion, list, rect, stack_line,
-    traditional_fill, tree_direction, tree_focus, tree_orientation, tree_query, window_constraints,
+    frames, from_maybe_word, from_orientation, gaps, insertion, list, rect, release_flat,
+    stack_line, traditional_fill, tree_direction, tree_focus, tree_orientation, tree_query,
+    window_constraints,
 };
 use crate::abi;
 use crate::bsp_tree::LayoutKey;
@@ -551,8 +552,8 @@ impl StackTreeBox {
         };
         unsafe {
             abi::decref_list_of_boundary_stack_layout_slot(viewed.layouts, host);
-            viewed.layout_free.decref(host);
-            viewed.left_out.decref(host);
+            release_flat(viewed.layout_free, host);
+            release_flat(viewed.left_out, host);
         }
         (StackTreeBox(viewed.model), view)
     }

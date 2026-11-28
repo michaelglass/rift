@@ -1,0 +1,7 @@
+# A view releasing a list of refcounted elements with the shallow `decref` leaks every nested
+# allocation (cam-3 found one). Flat lists go through `boundary::release_flat`, whose type takes
+# only lists of plain elements; lists of refcounted elements go through their generated deep
+# release (`abi::decref_list_of_...`).
+disallowed-methods = [
+    { path = "rift_core_roc::abi::roc_platform_abi_items::RocListWith::decref", reason = "shallow: use boundary::release_flat (plain elements) or the list's generated abi::decref_list_of_... (refcounted elements)" },
+]

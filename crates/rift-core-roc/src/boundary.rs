@@ -110,6 +110,19 @@ fn list<T: Copy, const REFCOUNTED: bool>(
     unsafe { abi::RocListWith::from_slice(items, host) }
 }
 
+/// One owned reference to a list of plain elements released. The type admits only lists whose
+/// elements hold nothing refcounted; a list of refcounted elements is released by its generated
+/// deep release (`abi::decref_list_of_...`), never shallowly.
+///
+/// # Safety
+/// `items` must own one live Roc list reference, released once.
+pub(crate) unsafe fn release_flat<T>(items: abi::RocListWith<T, false>, host: &abi::RocHost) {
+    #[allow(clippy::disallowed_methods)] // the one shallow release, typed to plain elements
+    unsafe {
+        items.decref(host)
+    }
+}
+
 /// A tag union value: the union's type, its payload union's type and field, and its tag.
 macro_rules! union {
     ($ty:ident, $payload:ident . $field:ident ($value:expr), $tag:expr) => {
@@ -237,7 +250,7 @@ pub(crate) fn frames(
         .map(|frame| (from_window(frame.window), from_rect(frame.frame)))
         .collect();
     // SAFETY: the list is Roc's answer, owned here and read in full above.
-    unsafe { answer.decref(host) };
+    unsafe { release_flat(answer, host) };
     frames
 }
 
@@ -248,7 +261,7 @@ pub(crate) fn rects(
 ) -> Vec<Rect> {
     let rects = answer.as_slice().iter().copied().map(from_rect).collect();
     // SAFETY: the list is Roc's answer, owned here and read in full above.
-    unsafe { answer.decref(host) };
+    unsafe { release_flat(answer, host) };
     rects
 }
 
@@ -744,7 +757,7 @@ pub(crate) fn axis_question(
 pub(crate) fn lengths(answer: abi::RocListWith<f64, false>, host: &abi::RocHost) -> Vec<f64> {
     let lengths = answer.as_slice().to_vec();
     // SAFETY: the list is Roc's answer, owned here and read in full above.
-    unsafe { answer.decref(host) };
+    unsafe { release_flat(answer, host) };
     lengths
 }
 
@@ -3020,7 +3033,7 @@ impl LifecycleBox {
             .iter()
             .map(|entry| (entry.window, from_present(entry.presence)))
             .collect();
-        unsafe { viewed.windows.decref(host) };
+        unsafe { release_flat(viewed.windows, host) };
         windows.sort_by_key(|&(window, _)| window);
         (LifecycleBox(viewed.model), windows)
     }
@@ -3095,9 +3108,9 @@ impl WorkspacesBox {
                 .collect(),
         };
         unsafe {
-            viewed.catalog.decref(host);
-            viewed.activations.decref(host);
-            viewed.owners.decref(host);
+            release_flat(viewed.catalog, host);
+            release_flat(viewed.activations, host);
+            release_flat(viewed.owners, host);
             abi::decref_list_of_boundary_workspace_windows(viewed.windows, host);
         }
         (WorkspacesBox(viewed.model), view)
@@ -3271,7 +3284,7 @@ impl MainWindowsBox {
                 })
             })
             .collect();
-        unsafe { viewed.apps.decref(host) };
+        unsafe { release_flat(viewed.apps, host) };
         let view = crate::main_window::MainWindowsView {
             main_window: from_maybe_word(viewed.main_window),
             native_focus: from_native_focus(viewed.native_focus),
@@ -3431,8 +3444,8 @@ impl SizesBox {
             .map(|m| (m.pid, from_size(m.min)))
             .collect();
         unsafe {
-            viewed.windows.decref(host);
-            viewed.app_minimums.decref(host);
+            release_flat(viewed.windows, host);
+            release_flat(viewed.app_minimums, host);
         }
         let view = Constraints::from_parts(windows, minimums, viewed.revision);
         (SizesBox(viewed.model), view)
@@ -3515,8 +3528,8 @@ impl DisplayMemoryBox {
             viewed.last_spaces.as_slice().iter().map(|e| (e.display, e.space)),
         );
         unsafe {
-            viewed.displays.decref(host);
-            viewed.last_spaces.decref(host);
+            release_flat(viewed.displays, host);
+            release_flat(viewed.last_spaces, host);
         }
         (DisplayMemoryBox(viewed.model), view)
     }
@@ -4162,7 +4175,7 @@ impl EvictionsBox {
                 landed: r.landed,
             })
         }));
-        unsafe { viewed.records.decref(host) };
+        unsafe { release_flat(viewed.records, host) };
         (EvictionsBox(viewed.model), view)
     }
 }
@@ -4333,9 +4346,9 @@ impl FloatsBox {
                 .map(|e| (e.workspace, e.window, from_rect(e.frame))),
         );
         unsafe {
-            viewed.floating.decref(host);
-            viewed.fullscreen.decref(host);
-            viewed.frames.decref(host);
+            release_flat(viewed.floating, host);
+            release_flat(viewed.fullscreen, host);
+            release_flat(viewed.frames, host);
         }
         (FloatsBox(viewed.model), floats)
     }
@@ -5379,11 +5392,11 @@ impl BspTreeBox {
             aspect: from_aspect(viewed.aspect),
         };
         unsafe {
-            viewed.layouts.decref(host);
-            viewed.layout_free.decref(host);
+            release_flat(viewed.layouts, host);
+            release_flat(viewed.layout_free, host);
             abi::decref_list_of_boundary_bsp_node_slot(viewed.nodes, host);
-            viewed.node_free.decref(host);
-            viewed.left_out.decref(host);
+            release_flat(viewed.node_free, host);
+            release_flat(viewed.left_out, host);
         }
         (BspTreeBox(viewed.model), view)
     }

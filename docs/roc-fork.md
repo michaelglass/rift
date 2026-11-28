@@ -816,6 +816,16 @@ no reactor test file changed. The asserted values are the same.
   it changes the polynomial's result in 0.012% of evaluations. Five of the eleven survived the
   first generator; each led to the generator change named above, not to a code change.
 
+**A shallow list release can no longer be written (the lead's ruling, 2026-11-28).** A view
+releasing a list of refcounted elements with `RocListWith::decref` leaks every nested
+allocation. `crates/rift-core-roc/clippy.toml` disallows that method (the reason names both
+ways out) and the crate denies `clippy::disallowed_methods`, allowed only on the generated ABI
+module and on `boundary::release_flat`, whose type takes only `RocListWith<T, false>` (lists
+of plain elements). A list of refcounted elements goes through its generated deep release
+(`abi::decref_list_of_...`). The 25 shallow releases in view and seed code all type-checked as
+flat lists, so no second leak was hiding. Planted: a shallow `decref` in a view is refused by
+clippy; `release_flat` on a list of refcounted elements does not compile.
+
 - Next: cam-4 (Roc decides).
 
 **Pruning (the lead, 2026-11-26):** at a milestone, delete only what no future build reuses:

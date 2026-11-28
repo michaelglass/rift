@@ -12,8 +12,8 @@ use rift_core::layout::columns::{
 };
 
 use super::{
-    from_insertion, from_maybe_word, insertion, list, rect, traditional_fill, tree_direction,
-    tree_focus, tree_query,
+    from_insertion, from_maybe_word, insertion, list, rect, release_flat, traditional_fill,
+    tree_direction, tree_focus, tree_query,
 };
 use crate::abi;
 use crate::bsp_tree::LayoutKey;
@@ -781,9 +781,9 @@ impl ColumnsBox {
         };
         unsafe {
             abi::decref_list_of_boundary_columns_layout_slot(seed.layouts, host);
-            seed.layout_free.decref(host);
-            seed.left_out.decref(host);
-            seed.settings.preset_column_widths.decref(host);
+            release_flat(seed.layout_free, host);
+            release_flat(seed.left_out, host);
+            release_flat(seed.settings.preset_column_widths, host);
         }
         (ColumnsBox(viewed.model), view)
     }
