@@ -58,6 +58,9 @@ report() {
     if [ -z "$counts" ]; then
         counts=$(sed -n 's/.*Summary \[.*\] *[0-9]* tests* run: \(.*\)/\1/p' "$logs/$name.log" | tail -1)
     fi
+    if [ "$name" = clippy ]; then
+        counts=$(tail -1 "$logs/$name.log")
+    fi
     echo "$name: exit $status $counts"
     [ "$status" -eq 0 ] || failed=1
 }
@@ -102,6 +105,23 @@ for line in open(sys.argv[1]):
         print(message["executable"])' "$1" | tail -1
 }
 
+# `clippy_gate`: the workspace's own crates re-linted every run, so the count never depends on
+# the cache (clippy's arguments are in the fingerprint of the workspace's crates only, so a new
+# nonce re-lints exactly them; dependencies and build scripts stay cached), every warning checked
+# against roc/clippy-baseline.txt, which only shrinks (roc/clippy_gate.py). It runs beside the
+# tests in its own target dir (target/clippy), so it never waits on the build lock.
+clippy_gate() {
+    local nonce status
+    nonce=$(date +%s)$$
+    CARGO_TARGET_DIR=target/clippy cargo clippy --all-targets --features roc-core \
+        --message-format=json -- \
+        --cfg "clippy_gate=\"$nonce\"" --check-cfg 'cfg(clippy_gate, values(any()))' \
+        >"$logs/clippy.json" 2>"$logs/clippy.stderr"
+    status=$?
+    python3 roc/clippy_gate.py check "$logs/clippy.json" roc/clippy-baseline.txt || return 1
+    return "$status"
+}
+
 run fmt cargo +nightly fmt --all --check
 if [ "$mode" = full ]; then
     run check-plain cargo check --locked --workspace --all-targets
@@ -115,20 +135,6 @@ run build-core cargo nextest run -p rift-core --no-run
 if [ "$mode" = full ]; then
     run build-lib cargo test --lib --no-run --message-format=json
     run build-workspace cargo nextest run --workspace --no-run
-    # The gate: the workspace's own crates re-linted every run, so the count never depends on the
-    # cache (clippy's arguments are in the fingerprint of the workspace's crates only, so a new
-    # nonce re-lints exactly them; dependencies, build scripts and the test builds stay as they
-    # are), and every warning checked against roc/clippy-baseline.txt, which only shrinks
-    # (roc/clippy_gate.py).
-    nonce=$(date +%s)$$
-    cargo clippy --all-targets --features roc-core --message-format=json -- \
-        --cfg "clippy_gate=\"$nonce\"" --check-cfg 'cfg(clippy_gate, values(any()))' \
-        >"$logs/clippy.json" 2>"$logs/clippy.log"
-    status=$?
-    python3 roc/clippy_gate.py check "$logs/clippy.json" roc/clippy-baseline.txt >>"$logs/clippy.log" 2>&1
-    gate=$?
-    echo "clippy: exit $status, gate $gate: $(tail -1 "$logs/clippy.log")"
-    [ "$status" -eq 0 ] && [ "$gate" -eq 0 ] || failed=1
 fi
 lib_roc=$(executable "$logs/build-lib-roc.log")
 
@@ -142,6 +148,7 @@ if [ "$mode" = full ]; then
     spawn workspace cargo nextest run --workspace --no-fail-fast -E 'not (package(rift-wm) & kind(lib))'
     spawn fuzz-plain env "${FUZZ[@]}" "$lib" drag_invariants_hold_across_interleavings
     spawn fuzz-roc env "${FUZZ[@]}" "$lib_roc" drag_invariants_hold_across_interleavings
+    spawn clippy clippy_gate
 else
     spawn lib-roc env "${FAST_CUTS[@]}" "$lib_roc"
     spawn core-roc env "${FAST_CUTS[@]}" cargo nextest run -p rift-core-roc --features roc --no-fail-fast

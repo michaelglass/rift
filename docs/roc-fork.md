@@ -894,6 +894,10 @@ cache: clippy re-emits warnings only for crates it re-lints (one run printed 4).
   lists that is gone, naming it: shrink the baseline in the same commit (`shrink`, which never
   adds one). The list can only go down. Tried both ways: an unused variable added fails the gate;
   a listed warning that is gone fails it until `shrink` removes it.
+- **It runs beside the tests, in its own target dir** (`target/clippy`), so it never waits on
+  the build lock and never invalidates the main target's `cargo check` artifacts: the full check
+  with everything built went from 99 s (gate serial) to 50 s and 51 s, more than the gate's own
+  29 s.
 
 - Next: E3c-1b (the snapshot as core values: the layout's core value, active layout, size,
   camera).
