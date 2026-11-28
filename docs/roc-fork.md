@@ -1434,7 +1434,21 @@ which all eleven call sites now ask. With this, every E1c choice decides in Roc.
 - Plants 13/13, among them the part's two payload plants (a Roc addition into a layout the facts do
   not hold; a Roc placement request where the rule makes only a resize), both caught at the door.
 
-- Next: E1d (displays and the native reconcile).
+**E1d-1 (2026-11-28): the display and departure choices are core functions.**
+- `display_memory::rehomed` (over `Homed::{Homed, Homeless}`): the workspaces of a Space a display
+  now shows that take it as their home, those without one; `resync` → `Resync::{Resync, Unchanged}`:
+  the Space's scrolling widths resync when the display memory changed or a workspace was re-homed
+  (`update_space_display`). `LastSpace::Hold` stays a computed input until the config slice (the
+  lead's decision).
+- `native_memory::native_move` (over `Origin::{Unassigned, On(S)}`) → `Move::{Departure, Within,
+  Unassigned}`: which moves of a reconcile batch capture their source first
+  (`begin_native_reconcile`). The old test read a workspace on no Space as a departure; that state
+  cannot occur (every workspace rift holds is on a Space, which the engine already expects, and the
+  departure path would index a workspace it does not hold), so `Origin` has no such case: a plant
+  on it survived, and the case was removed rather than tested.
+- Plants 7/7 (core and engine; the spaceless plant's target is gone).
+
+- Next: E1d-2 (the display and departure choices in Roc).
 
 **Pruning (the lead, 2026-11-26):** at a milestone, delete only what no future build reuses:
 stale `target/roc-build` keys (all but the current sources', which the build script's line

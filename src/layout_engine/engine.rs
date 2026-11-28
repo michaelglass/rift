@@ -1647,11 +1647,18 @@ impl LayoutEngine {
         moves: &[(WindowId, SpaceId)],
     ) {
         // Capture every source before the first arrival can modify another source tree.
+        use rift_core::native_memory::{Move, Origin};
         for &(window, target) in moves {
-            if windows.workspace_for_window(window).is_some_and(|source| {
-                self.workspaces.reading(windows).workspace_space(source) != Some(target)
-            }) {
-                self.remember_native_departure(windows, window);
+            let origin = match windows.workspace_for_window(window) {
+                None => Origin::Unassigned,
+                Some(source) => Origin::On(
+                    (self.workspaces.reading(windows).workspace_space(source))
+                        .expect("a listed workspace has a Space"),
+                ),
+            };
+            match rift_core::native_memory::native_move(origin, target) {
+                Move::Departure => self.remember_native_departure(windows, window),
+                Move::Within | Move::Unassigned => {}
             }
         }
         self.native.step(MemoryEvent::ReconcileBegan);
@@ -2034,16 +2041,22 @@ impl LayoutEngine {
             }
             return;
         };
-        let mut placed = false;
-        let on_space: Vec<_> = self.workspaces.reading(windows).workspaces_on(space).collect();
-        for id in on_space {
+        use rift_core::display_memory::{Homed, Resync};
+        let on_space: Vec<_> = (self.workspaces.reading(windows).workspaces_on(space))
+            .map(|id| {
+                let homed = match self.workspaces[id].home.display() {
+                    Some(_) => Homed::Homed,
+                    None => Homed::Homeless,
+                };
+                (id, homed)
+            })
+            .collect();
+        let rehomed = rift_core::display_memory::rehomed(&on_space);
+        for &id in &rehomed {
             let workspace = &mut self.workspaces[id];
-            if workspace.home.display().is_none() {
-                let by = workspace.home.placed_by().unwrap_or_default();
-                workspace.home =
-                    crate::model::virtual_workspace::Home::placed(space, Some(uuid.to_owned()), by);
-                placed = true;
-            }
+            let by = workspace.home.placed_by().unwrap_or_default();
+            workspace.home =
+                crate::model::virtual_workspace::Home::placed(space, Some(uuid.to_owned()), by);
         }
         // An unresolved saved Space still needs this display's evidence.
         let last = if self.saved_space_is_unresolved(self.last_space_for_display_uuid(uuid)) {
@@ -2056,10 +2069,10 @@ impl LayoutEngine {
             display: uuid.to_owned(),
             last,
         });
-        if !(shown || placed) {
-            return;
+        match rift_core::display_memory::resync(shown, rehomed.len()) {
+            Resync::Resync => self.sync_scrolling_widths_for_space(windows, space),
+            Resync::Unchanged => {}
         }
-        self.sync_scrolling_widths_for_space(windows, space);
     }
 
     fn sync_scrolling_widths_for_space(&mut self, windows: Windows<'_>, space: SpaceId) {

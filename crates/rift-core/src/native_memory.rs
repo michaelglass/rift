@@ -338,9 +338,46 @@ where W: Clone
     fn windows(&self) -> Vec<W> { self.clone() }
 }
 
+/// Where a window a reconcile batch moves comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Origin<S> {
+    /// It has no workspace.
+    Unassigned,
+    /// Its workspace is on Space `S` (every workspace rift holds is on one).
+    On(S),
+}
+
+/// What a move in a reconcile batch is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Move {
+    /// It leaves its workspace's Space: its source is captured before any arrival edits a tree.
+    Departure,
+    /// It moves within its workspace's Space.
+    Within,
+    /// It has no workspace to depart from.
+    Unassigned,
+}
+
+/// What moving a window from `origin` to Space `target` is.
+pub fn native_move<S: PartialEq>(origin: Origin<S>, target: S) -> Move {
+    match origin {
+        Origin::Unassigned => Move::Unassigned,
+        Origin::On(space) if space == target => Move::Within,
+        Origin::On(_) => Move::Departure,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_move_off_its_workspaces_space_is_a_departure() {
+        use super::{Move, Origin, native_move};
+        assert_eq!(native_move(Origin::On(1), 2), Move::Departure);
+        assert_eq!(native_move(Origin::On(2), 2), Move::Within);
+        assert_eq!(native_move(Origin::<u8>::Unassigned, 2), Move::Unassigned);
+    }
 
     /// A snapshot as a plain list of windows.
     #[derive(Clone, Debug, PartialEq)]

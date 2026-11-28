@@ -124,9 +124,63 @@ impl<S: Ord + Copy, D: Ord + Clone> DisplayMemory<S, D> {
     }
 }
 
+/// Whether a workspace on a Space that a display now shows has a home display.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Homed {
+    /// It has one: it keeps it.
+    Homed,
+    /// It has none: it takes this display as its home.
+    Homeless,
+}
+
+/// The workspaces of `on_space` that take the display showing it as their home: those without
+/// one, in order.
+pub fn rehomed<K: Copy>(on_space: &[(K, Homed)]) -> Vec<K> {
+    on_space
+        .iter()
+        .filter(|(_, homed)| *homed == Homed::Homeless)
+        .map(|&(id, _)| id)
+        .collect()
+}
+
+/// Whether a Space's scrolling widths are synced again after a display update.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Resync {
+    /// The display memory changed, or a workspace took the display as its home.
+    Resync,
+    Unchanged,
+}
+
+/// Whether a display update resyncs its Space's widths: `shown`, the display memory changed;
+/// `rehomed`, how many workspaces took the display as their home.
+pub fn resync(shown: bool, rehomed: usize) -> Resync {
+    if shown || rehomed > 0 {
+        Resync::Resync
+    } else {
+        Resync::Unchanged
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_shown_display_rehomes_only_homeless_workspaces_and_resyncs_on_any_change() {
+        use super::{Homed, Resync, rehomed, resync};
+        assert_eq!(
+            rehomed(&[
+                (1, Homed::Homed),
+                (2, Homed::Homeless),
+                (3, Homed::Homeless)
+            ]),
+            vec![2, 3]
+        );
+        assert_eq!(rehomed::<u8>(&[(1, Homed::Homed)]), Vec::<u8>::new());
+        assert_eq!(resync(true, 0), Resync::Resync);
+        assert_eq!(resync(false, 2), Resync::Resync);
+        assert_eq!(resync(false, 0), Resync::Unchanged);
+    }
 
     type Machine = DisplayMemory<u32, &'static str>;
 
