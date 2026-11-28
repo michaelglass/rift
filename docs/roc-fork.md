@@ -950,8 +950,31 @@ batch (`Batch::{Idle, Collecting(set)}`); it replaced the engine's `native_layou
   a held window added again, never spent; in the engine, a closed window left in the snapshots,
   an identity change not followed, a window of another workspace taken back.
 
-- Next: E3c-3 (its Roc twin: the batch and each snapshot's windows as words; the values stay in
-  the Rust machine, and restores count as seeds).
+**E3c-3 (2026-11-28): the native memory's Roc twin.** The lead's change to the plan: the Roc
+core does not hold each snapshot's windows either (that would bring the deleted copy back on the
+Roc side). As the camera takes `Spans`, each event that reads a snapshot's windows carries them,
+computed from the values (`NativeMemory::crossing` turns an event into `NativeEvent`): `Kept` and
+`Edited` carry the snapshot's windows, `RestoreAsked` the held snapshot's. The Roc core owns only
+what it alone owns: which workspaces hold a snapshot, and the batch (`Owned`); it answers a
+`Decided` (a plan without the snapshot value). No event needs every snapshot's windows at once.
+- `roc/core/NativeMemory.roc`, `RocNative`, and the Boundary types (`Native*`).
+- `roc_twin::TwinnedNative<S>` (policy (a)): the Roc core decides, the Rust machine holds the
+  values and its decisions are the Roc core's shadow; a Roc restore decision is applied to the
+  Rust machine's value of that snapshot. On a disagreement both are brought to what they share
+  (the shadow keeps only the snapshots the Roc core holds, and its batch; the Roc core forgets a
+  workspace the shadow has no value for), counted (`native_reseeds`, in the run log).
+- Differential (`rift-core-roc/tests/native_memory.rs`): the Rust machine holding each snapshot
+  as its list of windows against the Roc core fed each event's crossing, 80 000 steps (answers
+  and owned state after each), and a copy tripwire; check-fast cuts it to 200 runs.
+- Plants 9/9: in the twin, the shadow keeping a snapshot the Roc core lacks, the Roc core keeping
+  a workspace the shadow has no value for, a snapshot's windows crossing wrong; in Roc, an empty
+  departure kept, an emptied snapshot kept, a forgotten workspace still waiting, an absent window
+  taken back, a spent snapshot kept, a restore for a returning window it does not hold.
+
+**E3 is done:** the display memory, the evictions, the cameras and the native memory are core
+machines, each deciding in Roc.
+
+- Next: E1 (routing), to the end-of-E1 target.
 
 **Pruning (the lead, 2026-11-26):** at a milestone, delete only what no future build reuses:
 stale `target/roc-build` keys (all but the current sources', which the build script's line

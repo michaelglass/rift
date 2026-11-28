@@ -35,6 +35,9 @@ use rift_core::lifecycle::{
 use rift_core::main_window::{
     App, Initiator, MainWindowEvent, NativeFocus, Standing as MainStanding,
 };
+use rift_core::native_memory::{
+    Batch, Current, Decided, Decision, NativeEvent, Owned as NativeOwned,
+};
 use rift_core::plain::{Answers, Fact, Nanos, Plain, Point, Rect, RequestId, Unasked, WindowId};
 use rift_core::topology::{
     self, Admission, DiscoveredSpace, DiscoveryStanding, Displays, Hold, MissionControl, Standing,
@@ -4206,6 +4209,174 @@ impl Drop for CamerasBox {
     fn drop(&mut self) {
         // SAFETY: the box is this machine's and is never used again.
         unsafe { abi::roc_cameras_release(self.0) }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The native memory.
+
+fn native_current(current: Current<u64>, host: &abi::RocHost) -> abi::BoundaryNativeCurrent {
+    use abi::BoundaryNativeCurrentTag as Tag;
+    match current {
+        Current::Unlaid => {
+            union!(
+                BoundaryNativeCurrent,
+                BoundaryNativeCurrentPayload.unlaid,
+                Tag::Unlaid
+            )
+        }
+        Current::Laid(candidates) => {
+            let candidates: Vec<_> = (candidates.into_iter())
+                .map(|c| abi::BoundaryNativeCandidate {
+                    window: c.window,
+                    in_workspace: c.in_workspace,
+                    present: c.present,
+                    floating: c.floating,
+                })
+                .collect();
+            union!(
+                BoundaryNativeCurrent,
+                BoundaryNativeCurrentPayload.laid(list(&candidates, host)),
+                Tag::Laid
+            )
+        }
+    }
+}
+
+fn native_event(event: NativeEvent<u64, u64>, host: &abi::RocHost) -> abi::BoundaryNativeEvent {
+    use abi::BoundaryNativeEventTag as Tag;
+    let windows = |workspace, windows: Vec<u64>| abi::BoundaryNativeWindows {
+        workspace,
+        windows: list(&windows, host),
+    };
+    match event {
+        NativeEvent::Kept { workspace, windows: w } => union!(
+            BoundaryNativeEvent,
+            BoundaryNativeEventPayload.kept(windows(workspace, w)),
+            Tag::Kept
+        ),
+        NativeEvent::Edited { workspace, windows: w } => union!(
+            BoundaryNativeEvent,
+            BoundaryNativeEventPayload.edited(windows(workspace, w)),
+            Tag::Edited
+        ),
+        NativeEvent::Forgotten(workspace) => union!(
+            BoundaryNativeEvent,
+            BoundaryNativeEventPayload.forgotten(workspace),
+            Tag::Forgotten
+        ),
+        NativeEvent::Cleared => {
+            union!(
+                BoundaryNativeEvent,
+                BoundaryNativeEventPayload.cleared,
+                Tag::Cleared
+            )
+        }
+        NativeEvent::ReconcileBegan => union!(
+            BoundaryNativeEvent,
+            BoundaryNativeEventPayload.reconcile_began,
+            Tag::ReconcileBegan
+        ),
+        NativeEvent::ReconcileEnded => union!(
+            BoundaryNativeEvent,
+            BoundaryNativeEventPayload.reconcile_ended,
+            Tag::ReconcileEnded
+        ),
+        NativeEvent::RestoreAsked {
+            workspace,
+            returning,
+            current,
+            held,
+        } => union!(
+            BoundaryNativeEvent,
+            BoundaryNativeEventPayload.restore_asked(abi::BoundaryNativeAsk {
+                workspace,
+                returning: maybe_word(returning),
+                current: native_current(current, host),
+                held: list(&held, host),
+            }),
+            Tag::RestoreAsked
+        ),
+    }
+}
+
+fn from_native_answer(a: &abi::BoundaryNativeAnswer) -> Decided<u64, u64> {
+    use abi::BoundaryNativeAnswerTag as Tag;
+    // SAFETY: each arm reads the payload its tag names.
+    match a.tag {
+        Tag::Nothing => Decided::Nothing,
+        Tag::Deferred => Decided::Deferred,
+        Tag::Restore => {
+            let p = unsafe { a.borrow_payload_restore_unchecked() };
+            Decided::Restore(Decision {
+                remove: p.remove.as_slice().to_vec(),
+                ordered: p.ordered.as_slice().to_vec(),
+                add: p.add.as_slice().to_vec(),
+                spent: p.spent,
+            })
+        }
+        Tag::Waited => {
+            Decided::Waited(unsafe { a.borrow_payload_waited_unchecked() }.as_slice().to_vec())
+        }
+    }
+}
+
+/// The native memory's box, which only Roc can read or free; only the `roc_native_*` entries
+/// make and take one. Dropping it releases the machine.
+pub(crate) struct NativeBox(abi::RocBox);
+
+impl NativeBox {
+    pub(crate) fn empty() -> NativeBox { NativeBox(unsafe { abi::roc_native_init() }) }
+
+    /// The raw box, handed to Roc (see [`LifecycleBox::into_raw`]).
+    fn into_raw(self) -> abi::RocBox {
+        let raw = self.0;
+        std::mem::forget(self);
+        raw
+    }
+
+    /// An event: the machine after it, and what it answered.
+    pub(crate) fn step(
+        self,
+        event: NativeEvent<u64, u64>,
+        host: &abi::RocHost,
+    ) -> (NativeBox, Decided<u64, u64>) {
+        // SAFETY: the box is this machine's, given to the step; its successor comes back. The
+        // answer is read in full, then released (its lists with it).
+        let stepped = unsafe { abi::roc_native_step(self.into_raw(), native_event(event, host)) };
+        let answer = from_native_answer(&stepped.answer);
+        unsafe { stepped.answer.decref(host) };
+        (NativeBox(stepped.model), answer)
+    }
+
+    /// Which workspaces hold a snapshot, and the batch.
+    pub(crate) fn view(self, host: &abi::RocHost) -> (NativeBox, NativeOwned<u64>) {
+        // SAFETY: as in `step`; the lists are Roc's answer, owned here, read in full, released.
+        let viewed = unsafe { abi::roc_native_view(self.into_raw()) };
+        let held = viewed.held.as_slice().iter().copied().collect();
+        let batch = match viewed.batch.tag {
+            abi::BoundaryNativeBatchViewTag::Idle => Batch::Idle,
+            abi::BoundaryNativeBatchViewTag::Collecting => Batch::Collecting(
+                // SAFETY: the tag says the payload is the waiting workspaces.
+                unsafe { viewed.batch.borrow_payload_collecting_unchecked() }
+                    .as_slice()
+                    .iter()
+                    .copied()
+                    .collect(),
+            ),
+        };
+        unsafe {
+            release_flat(viewed.held, host);
+            viewed.batch.decref(host);
+        }
+        (NativeBox(viewed.model), NativeOwned { held, batch })
+    }
+}
+
+impl Drop for NativeBox {
+    fn drop(&mut self) {
+        // SAFETY: the box is this machine's and is never used again.
+        unsafe { abi::roc_native_release(self.0) }
     }
 }
 

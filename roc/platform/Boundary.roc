@@ -999,6 +999,28 @@ Boundary := [].{
 	## A layout's camera, as the view lists it.
 	CamEntry := { layout : U64, camera : CamCamera }
 
+	# The native memory (`rift_core::native_memory`) as the Roc core owns it: which workspaces hold
+	# a snapshot, and the reconcile batch. Workspaces and windows are one word each; a snapshot's
+	# windows ride on the events that read them.
+
+	NativeWindows := { workspace : U64, windows : List(U64) }
+
+	NativeCandidate := { window : U64, in_workspace : Bool, present : Bool, floating : Bool }
+
+	NativeCurrent := [Unlaid, Laid(List(NativeCandidate))]
+
+	NativeAsk := { workspace : U64, returning : MaybeWord, current : NativeCurrent, held : List(U64) }
+
+	## What the layout engine tells the native memory.
+	NativeEvent := [Kept(NativeWindows), Edited(NativeWindows), Forgotten(U64), Cleared, ReconcileBegan, ReconcileEnded, RestoreAsked(NativeAsk)]
+
+	NativePlan := { remove : List(U64), ordered : List(U64), add : List(U64), spent : Bool }
+
+	## What the native memory answered.
+	NativeAnswer := [Nothing, Deferred, Restore(NativePlan), Waited(List(U64))]
+
+	NativeBatchView := [Idle, Collecting(List(U64))]
+
 	# The floating state (`rift_core::floats`), kept between events. Windows and workspaces are one
 	# word each, pids an I32 (macOS's pid_t).
 

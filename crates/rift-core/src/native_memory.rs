@@ -110,6 +110,14 @@ impl<Ws, S> Default for NativeMemory<Ws, S> {
 }
 
 impl<Ws: Ord + Copy, S: Clone> NativeMemory<Ws, S> {
+    /// A machine holding exactly `snapshots` and `batch` (a twin's reseed).
+    pub fn from_parts(snapshots: impl IntoIterator<Item = (Ws, S)>, batch: Batch<Ws>) -> Self {
+        NativeMemory {
+            snapshots: snapshots.into_iter().collect(),
+            batch,
+        }
+    }
+
     /// Whether a departure of a window of `workspace` keeps a snapshot: not for a floating
     /// window, and not over one already held.
     pub fn keeps(&self, workspace: Ws, floating: bool) -> bool {
@@ -216,6 +224,118 @@ impl<Ws: Ord + Copy, S: Clone> NativeMemory<Ws, S> {
         }
         MemoryAnswer::Restore(plan)
     }
+}
+
+// The machine as a Roc core owns it: snapshots' values stay with the host, so an event crosses
+// with the windows it reads (computed from the values), and the Roc core holds only which
+// workspaces hold a snapshot and the batch.
+
+/// An event as it crosses to a core that holds no snapshot values.
+#[derive(Clone, Debug, PartialEq)]
+pub enum NativeEvent<W, Ws> {
+    Kept {
+        workspace: Ws,
+        windows: Vec<W>,
+    },
+    Edited {
+        workspace: Ws,
+        windows: Vec<W>,
+    },
+    Forgotten(Ws),
+    Cleared,
+    ReconcileBegan,
+    ReconcileEnded,
+    /// `held`: the windows of the workspace's snapshot, none if it holds none.
+    RestoreAsked {
+        workspace: Ws,
+        returning: Option<W>,
+        current: Current<W>,
+        held: Vec<W>,
+    },
+}
+
+/// What such a core owns: the workspaces holding a snapshot, and the batch.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Owned<Ws> {
+    pub held: BTreeSet<Ws>,
+    pub batch: Batch<Ws>,
+}
+
+/// A plan without the snapshot it is applied to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Decision<W> {
+    pub remove: Vec<W>,
+    pub ordered: Vec<W>,
+    pub add: Vec<W>,
+    pub spent: bool,
+}
+
+/// An answer without the snapshot value: what such a core answers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Decided<W, Ws> {
+    Nothing,
+    Deferred,
+    Restore(Decision<W>),
+    Waited(Vec<Ws>),
+}
+
+impl<W: Clone, Ws: Clone, S> MemoryAnswer<W, Ws, S> {
+    pub fn decided(&self) -> Decided<W, Ws> {
+        match self {
+            MemoryAnswer::Nothing => Decided::Nothing,
+            MemoryAnswer::Deferred => Decided::Deferred,
+            MemoryAnswer::Restore(plan) => Decided::Restore(Decision {
+                remove: plan.remove.clone(),
+                ordered: plan.ordered.clone(),
+                add: plan.add.clone(),
+                spent: plan.spent,
+            }),
+            MemoryAnswer::Waited(waited) => Decided::Waited(waited.clone()),
+        }
+    }
+}
+
+impl<Ws: Ord + Copy, S: Clone> NativeMemory<Ws, S> {
+    /// What the machine owns apart from the values.
+    pub fn owned(&self) -> Owned<Ws> {
+        Owned {
+            held: self.snapshots.keys().copied().collect(),
+            batch: self.batch.clone(),
+        }
+    }
+
+    /// `event` as it crosses, read against the machine before it steps.
+    pub fn crossing<W: Clone>(&self, event: &MemoryEvent<W, Ws, S>) -> NativeEvent<W, Ws>
+    where S: Held<W> {
+        match event {
+            MemoryEvent::Kept { workspace, snapshot } => NativeEvent::Kept {
+                workspace: *workspace,
+                windows: snapshot.windows(),
+            },
+            MemoryEvent::Edited { workspace, snapshot } => NativeEvent::Edited {
+                workspace: *workspace,
+                windows: snapshot.windows(),
+            },
+            MemoryEvent::Forgotten(workspace) => NativeEvent::Forgotten(*workspace),
+            MemoryEvent::Cleared => NativeEvent::Cleared,
+            MemoryEvent::ReconcileBegan => NativeEvent::ReconcileBegan,
+            MemoryEvent::ReconcileEnded => NativeEvent::ReconcileEnded,
+            MemoryEvent::RestoreAsked { workspace, returning, current } => {
+                NativeEvent::RestoreAsked {
+                    workspace: *workspace,
+                    returning: returning.clone(),
+                    current: current.clone(),
+                    held: self.get(*workspace).map(Held::windows).unwrap_or_default(),
+                }
+            }
+        }
+    }
+}
+
+impl<W> Held<W> for Vec<W>
+where W: Clone
+{
+    fn windows(&self) -> Vec<W> { self.clone() }
 }
 
 #[cfg(test)]

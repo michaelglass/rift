@@ -442,6 +442,43 @@ impl RocCameras {
     }
 }
 
+/// The native memory (`rift_core::native_memory::NativeMemory`) as the Roc core owns it: which
+/// workspaces hold a snapshot, and the reconcile batch; each event that reads a snapshot's
+/// windows carries them. Workspaces and windows are words.
+pub struct RocNative {
+    native: boundary::NativeBox,
+    host: abi::RocHost,
+}
+
+// SAFETY: as for `RocCore`.
+unsafe impl Send for RocNative {}
+
+impl Default for RocNative {
+    fn default() -> Self {
+        RocNative {
+            native: boundary::NativeBox::empty(),
+            host: host(),
+        }
+    }
+}
+
+impl RocNative {
+    /// As `NativeMemory::step`, the answer without its snapshot value.
+    pub fn step(
+        &mut self,
+        event: rift_core::native_memory::NativeEvent<u64, u64>,
+    ) -> rift_core::native_memory::Decided<u64, u64> {
+        let host = &self.host;
+        boundary::in_place(&mut self.native, |native| native.step(event, host))
+    }
+
+    /// What it owns.
+    pub fn view(&mut self) -> rift_core::native_memory::Owned<u64> {
+        let host = &self.host;
+        boundary::in_place(&mut self.native, |native| native.view(host))
+    }
+}
+
 /// Where a display's departure moved windows from (`rift_core::evictions::Evictions`), kept in
 /// Roc between events. Stepped beside the Rust machine, it must hold the same records. Windows,
 /// displays and workspaces are words, pids i32.

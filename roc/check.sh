@@ -39,6 +39,7 @@ FAST_CUTS=(
     RIFT_DISPLAYS_RUNS=200     # rift-core-roc: the display memory (2000)
     RIFT_EVICTIONS_RUNS=200    # rift-core-roc: the evictions (2000)
     RIFT_CAMERAS_RUNS=200      # rift-core-roc: the cameras (2000)
+    RIFT_NATIVE_RUNS=200       # rift-core-roc: the native memory (2000)
     RIFT_SESSION_ROUNDS=40     # rift-core-roc: the session (200)
 )
 # The full run's fuzzer budget.

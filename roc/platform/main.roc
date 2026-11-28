@@ -5,7 +5,7 @@
 ## step.
 platform ""
 	requires {
-		[Model : model, Windows : windows, Mains : mains, Joined : joined, Trees : trees, Stacks : stacks, Traditionals : traditionals, Masters : masters, Floatings : floatings, Cols : cols, Sizes : sizes, Floats : floats, Remembered : remembered, Evicted : evicted, Cams : cams] for core : {
+		[Model : model, Windows : windows, Mains : mains, Joined : joined, Trees : trees, Stacks : stacks, Traditionals : traditionals, Masters : masters, Floatings : floatings, Cols : cols, Sizes : sizes, Floats : floats, Remembered : remembered, Evicted : evicted, Cams : cams, Natives : natives] for core : {
 			init : {} -> model,
 			step : model, Event -> { model : model, effects : List(Effect) },
 			bsp : BspShape -> List(Frame),
@@ -76,6 +76,9 @@ platform ""
 			cameras_init : {} -> cams,
 			cameras_step : cams, CamerasEvent -> { model : cams, answer : CamAnswer },
 			cameras_view : cams -> { model : cams, cameras : List(CamEntry) },
+			native_init : {} -> natives,
+			native_step : natives, NativeEvent -> { model : natives, answer : NativeAnswer },
+			native_view : natives -> { model : natives, held : List(U64), batch : NativeBatchView },
 			narrow : F64 -> F32,
 			bsp_tree_init : BspInsertion -> trees,
 			bsp_tree_seed : BspTreeSeed -> trees,
@@ -146,6 +149,10 @@ platform ""
 		"roc_cameras_step": cameras_step_for_host,
 		"roc_cameras_view": cameras_view_for_host,
 		"roc_cameras_release": cameras_release_for_host,
+		"roc_native_init": native_init_for_host,
+		"roc_native_step": native_step_for_host,
+		"roc_native_view": native_view_for_host,
+		"roc_native_release": native_release_for_host,
 		"roc_narrow": narrow_for_host,
 		"roc_bsp_tree_init": bsp_tree_init_for_host,
 		"roc_bsp_tree_seed": bsp_tree_seed_for_host,
@@ -234,7 +241,7 @@ platform ""
 		},
 	}
 
-import Boundary exposing [AxisQuestion, TranslateQuestion, FloatingLayout, BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, Rect, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer, Admission, AdmitQuestion, CandidatesAnswer, CandidatesQuestion, DiscoveredAnswer, DiscoveredQuestion, DiscoveryAnswer, DiscoveryQuestion, AdmissionFacts, Change, InventoryQuestion, KeepsTransientQuestion, MisplacedQuestion, NativeTransientQuestion, NetQuestion, OutOfViewQuestion, PointerTargetQuestion, PresenceAnswer, PresenceQuestion, ReadAnswer, ReadQuestion, RetirementAnswer, RuleRefreshQuestion, RuleTargetsAnswer, RuleTargetsQuestion, SpaceAnswer, TitleChangeQuestion, VerdictAnswer, WindowAdmission, JoinedQuestion, JoinedView, PreviousQuestion, Reached, ResolveQuestion, StepQuestion, MaybeWord, Event, Effect, ReachedAnswer, EligibleQuestion, LifecycleEvent, PresentWindow, Invalidation, Revalidation, OwnershipEvent, Owned, WindowOwnership, WorkspaceSpace, SpaceActivation, JoinedEvent, Outcome, WorkspaceWindows, ModesQuestion, ModeVerdict, MainWindowEvent, NativeFocus, MainApp, SizesEvent, SizeRecord, AppMinimum, FloatsEvent, FloatFullscreenEntry, FloatFrameEntry, DisplayEvent, SpaceDisplay, EvictionEvent, EvictionRecord, CamerasEvent, CamAnswer, CamEntry, EmitsQuestion, QuarantineQuestion, TargetQuestion, TargetAnswer, RaiseQuestion, RaiseAnswer, BspTreeSeed, BspInsertion, BspTreeEvent, BspTreeAnswer, BspLayoutSlot, BspNodeSlot, BspTreeNode, Aspect, BspFramesQuestion, StackSettings, StackTreeSeed, StackTreeEvent, StackTreeAnswer, StackLayoutSlot, StackFramesQuestion, TraditionalSettings, TraditionalSeed, TraditionalEvent, MasterSettings, MasterStackSeed, MasterStackEvent, GroupLayoutQuestion, GroupLayoutAnswer, FloatingSeed, FloatingEvent, FloatingAnswer, FloatingLayoutQuestion, FloatingLayoutAnswer, ColumnsSettings, ColumnsSeed, ColumnsEvent, ColumnsAnswer]
+import Boundary exposing [AxisQuestion, TranslateQuestion, FloatingLayout, BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, Rect, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer, Admission, AdmitQuestion, CandidatesAnswer, CandidatesQuestion, DiscoveredAnswer, DiscoveredQuestion, DiscoveryAnswer, DiscoveryQuestion, AdmissionFacts, Change, InventoryQuestion, KeepsTransientQuestion, MisplacedQuestion, NativeTransientQuestion, NetQuestion, OutOfViewQuestion, PointerTargetQuestion, PresenceAnswer, PresenceQuestion, ReadAnswer, ReadQuestion, RetirementAnswer, RuleRefreshQuestion, RuleTargetsAnswer, RuleTargetsQuestion, SpaceAnswer, TitleChangeQuestion, VerdictAnswer, WindowAdmission, JoinedQuestion, JoinedView, PreviousQuestion, Reached, ResolveQuestion, StepQuestion, MaybeWord, Event, Effect, ReachedAnswer, EligibleQuestion, LifecycleEvent, PresentWindow, Invalidation, Revalidation, OwnershipEvent, Owned, WindowOwnership, WorkspaceSpace, SpaceActivation, JoinedEvent, Outcome, WorkspaceWindows, ModesQuestion, ModeVerdict, MainWindowEvent, NativeFocus, MainApp, SizesEvent, SizeRecord, AppMinimum, FloatsEvent, FloatFullscreenEntry, FloatFrameEntry, DisplayEvent, SpaceDisplay, EvictionEvent, EvictionRecord, CamerasEvent, CamAnswer, CamEntry, NativeEvent, NativeAnswer, NativeBatchView, EmitsQuestion, QuarantineQuestion, TargetQuestion, TargetAnswer, RaiseQuestion, RaiseAnswer, BspTreeSeed, BspInsertion, BspTreeEvent, BspTreeAnswer, BspLayoutSlot, BspNodeSlot, BspTreeNode, Aspect, BspFramesQuestion, StackSettings, StackTreeSeed, StackTreeEvent, StackTreeAnswer, StackLayoutSlot, StackFramesQuestion, TraditionalSettings, TraditionalSeed, TraditionalEvent, MasterSettings, MasterStackSeed, MasterStackEvent, GroupLayoutQuestion, GroupLayoutAnswer, FloatingSeed, FloatingEvent, FloatingAnswer, FloatingLayoutQuestion, FloatingLayoutAnswer, ColumnsSettings, ColumnsSeed, ColumnsEvent, ColumnsAnswer]
 
 ## The entries' results: each machine's box and what its step answers. They name the
 ## platform's model variables, so they live here, not in `Boundary`.
@@ -292,6 +299,12 @@ CamerasStepped := { model : Box(Cams), answer : CamAnswer }
 
 ## The cameras, unchanged, and every layout's camera (in layout order).
 CamerasViewed := { model : Box(Cams), cameras : List(CamEntry) }
+
+## The native memory after an event, and what it answered.
+NativeStepped := { model : Box(Natives), answer : NativeAnswer }
+
+## The native memory, unchanged, and what it owns.
+NativeViewed := { model : Box(Natives), held : List(U64), batch : NativeBatchView }
 
 ## A BSP layout system's trees after an operation, and what it answered.
 BspTreeStepped := { model : Box(Trees), answer : BspTreeAnswer }
@@ -719,6 +732,29 @@ cameras_view_for_host = |boxed| {
 ## The host cannot release a `Box(Cams)`: only Roc knows its layout.
 cameras_release_for_host : Box(Cams) -> {}
 cameras_release_for_host = |_| {}
+
+## The native memory (`rift_core::native_memory::NativeMemory`), kept between events: nothing
+## held, no batch, at first.
+native_init_for_host : {} -> Box(Natives)
+native_init_for_host = |{}| Box.box((core.native_init)({}))
+
+## An event, and what the native memory answered.
+native_step_for_host : Box(Natives), NativeEvent -> NativeStepped
+native_step_for_host = |boxed, event| {
+	stepped = (core.native_step)(Box.unbox(boxed), event)
+	{ model: Box.box(stepped.model), answer: stepped.answer }
+}
+
+## Which workspaces hold a snapshot, and the batch, and the machine back unchanged.
+native_view_for_host : Box(Natives) -> NativeViewed
+native_view_for_host = |boxed| {
+	viewed = (core.native_view)(Box.unbox(boxed))
+	{ model: Box.box(viewed.model), held: viewed.held, batch: viewed.batch }
+}
+
+## The host cannot release a `Box(Natives)`: only Roc knows its layout.
+native_release_for_host : Box(Natives) -> {}
+native_release_for_host = |_| {}
 
 ## The mode table's verdict on an initiative.
 mode_verdict_for_host : ModesQuestion -> ModeVerdict

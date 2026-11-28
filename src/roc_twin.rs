@@ -77,6 +77,15 @@ pub(crate) fn displays_reseeds() -> u64 {
     DISPLAYS_RESEEDS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// How many times the native memory's Rust shadow was re-seeded from the Roc core.
+#[cfg(feature = "roc-core")]
+static NATIVE_RESEEDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How many times the native memory's Rust shadow has been re-seeded from the Roc core (each one
+/// a `roc-divergence:` warned).
+#[cfg(feature = "roc-core")]
+pub(crate) fn native_reseeds() -> u64 { NATIVE_RESEEDS.load(std::sync::atomic::Ordering::Relaxed) }
+
 /// How many times the evictions' Rust shadow was re-seeded from the Roc core.
 #[cfg(feature = "roc-core")]
 static EVICTIONS_RESEEDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -1168,6 +1177,228 @@ impl TwinnedEvictions {
     }
 }
 
+/// The native memory as the engine holds it (engine slice E3c), over its snapshot values `S`.
+pub(crate) type RiftNative<S> = rift_core::native_memory::NativeMemory<VirtualWorkspaceId, S>;
+
+/// The native memory (engine slice E3c), with its Roc twin under `roc-core`. Flipped (policy (a)):
+/// the Roc core decides and owns which workspaces hold a snapshot and the reconcile batch; the
+/// Rust machine holds the snapshot values, its decisions the Roc core's shadow. Each event crosses
+/// with the windows it reads, computed from the values (`NativeMemory::crossing`). A Roc restore
+/// decision is applied to the Rust machine's value of that snapshot. On a disagreement both are
+/// brought to what they can share (the shadow keeps only the snapshots the Roc core holds, and its
+/// batch; the Roc core forgets a workspace the shadow has no value for), counted.
+pub(crate) struct TwinnedNative<S> {
+    rust: RiftNative<S>,
+    #[cfg(feature = "roc-core")]
+    twin: Box<NativeTwin>,
+}
+
+#[cfg(feature = "roc-core")]
+#[derive(Default)]
+struct NativeTwin {
+    roc: rift_core_roc::RocNative,
+    steps: u64,
+}
+
+impl<S> Default for TwinnedNative<S> {
+    fn default() -> Self {
+        TwinnedNative {
+            rust: Default::default(),
+            #[cfg(feature = "roc-core")]
+            twin: Default::default(),
+        }
+    }
+}
+
+impl<S> Deref for TwinnedNative<S> {
+    type Target = RiftNative<S>;
+
+    fn deref(&self) -> &Self::Target { &self.rust }
+}
+
+impl<S: std::fmt::Debug> std::fmt::Debug for TwinnedNative<S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { self.rust.fmt(f) }
+}
+
+impl<S> TwinnedNative<S>
+where S: rift_core::native_memory::Held<WindowId> + Clone + std::fmt::Debug
+{
+    /// As [`rift_core::native_memory::NativeMemory::step`]: under `roc-core`, the Roc core's
+    /// decision, applied to the Rust machine's snapshot value.
+    pub(crate) fn step(
+        &mut self,
+        event: rift_core::native_memory::MemoryEvent<WindowId, VirtualWorkspaceId, S>,
+    ) -> rift_core::native_memory::MemoryAnswer<WindowId, VirtualWorkspaceId, S> {
+        #[cfg(feature = "roc-core")]
+        let plain = native_words(self.rust.crossing(&event));
+        let answer = self.rust.step(event);
+        #[cfg(feature = "roc-core")]
+        let decided = {
+            use rift_core::native_memory::{Decided, MemoryAnswer, Plan};
+
+            use crate::roc_path::diverged;
+            let roc = self.twin.roc.step(plain.clone());
+            let rust_decided = decided_words(answer.decided());
+            let answer_differs = roc != rust_decided;
+            if answer_differs {
+                diverged("native memory step", &plain, &rust_decided, &roc);
+            }
+            self.twin.steps += 1;
+            if answer_differs || cfg!(test) || self.twin.steps.is_multiple_of(VIEW_EVERY) {
+                let rust_owned = owned_words(self.rust.owned());
+                let view = self.twin.roc.view();
+                if rust_owned != view {
+                    diverged("native memory", &plain, &rust_owned, &view);
+                }
+                if answer_differs || rust_owned != view {
+                    self.reseed(view);
+                }
+            }
+            // The Roc core decides; the snapshot value is the Rust machine's.
+            match (roc, answer) {
+                (_, answer) if !answer_differs => answer,
+                (Decided::Nothing, _) => MemoryAnswer::Nothing,
+                (Decided::Deferred, _) => MemoryAnswer::Deferred,
+                (Decided::Waited(waited), _) => {
+                    MemoryAnswer::Waited(waited.into_iter().map(workspace_of_word).collect())
+                }
+                (Decided::Restore(decision), MemoryAnswer::Restore(plan)) => {
+                    let windows = |words: Vec<u64>| -> Vec<WindowId> {
+                        words.into_iter().filter_map(crate::roc_path::window_of_word).collect()
+                    };
+                    MemoryAnswer::Restore(Plan {
+                        snapshot: plan.snapshot,
+                        remove: windows(decision.remove),
+                        ordered: windows(decision.ordered),
+                        add: windows(decision.add),
+                        spent: decision.spent,
+                    })
+                }
+                // A restore the Rust machine has no value for: nothing to restore from.
+                (Decided::Restore(_), _) => MemoryAnswer::Nothing,
+            }
+        };
+        #[cfg(not(feature = "roc-core"))]
+        let decided = answer;
+        decided
+    }
+
+    /// Both brought to what they can share, and counted.
+    #[cfg(feature = "roc-core")]
+    fn reseed(&mut self, view: rift_core::native_memory::Owned<u64>) {
+        use rift_core::native_memory::{Batch, NativeEvent};
+
+        use crate::roc_path::Word;
+        let shared: Vec<_> = (self.rust.snapshots())
+            .filter(|(workspace, _)| view.held.contains(&workspace.word()))
+            .map(|(workspace, snapshot)| (workspace, snapshot.clone()))
+            .collect();
+        let rust_held: std::collections::BTreeSet<u64> =
+            shared.iter().map(|(workspace, _)| workspace.word()).collect();
+        for &workspace in view.held.difference(&rust_held) {
+            self.twin.roc.step(NativeEvent::Forgotten(workspace));
+        }
+        let batch = match view.batch {
+            Batch::Idle => Batch::Idle,
+            Batch::Collecting(waiting) => {
+                Batch::Collecting(waiting.into_iter().map(workspace_of_word).collect())
+            }
+        };
+        self.rust = RiftNative::from_parts(shared, batch);
+        let reseeds = NATIVE_RESEEDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        tracing::warn!(
+            reseeds,
+            "roc-divergence: the native memory's Rust shadow was re-seeded from the Roc core"
+        );
+    }
+}
+
+#[cfg(feature = "roc-core")]
+fn native_words(
+    event: rift_core::native_memory::NativeEvent<WindowId, VirtualWorkspaceId>,
+) -> rift_core::native_memory::NativeEvent<u64, u64> {
+    use rift_core::native_memory::{Candidate, Current, NativeEvent as E};
+
+    use crate::roc_path::Word;
+    let words = |windows: Vec<WindowId>| windows.into_iter().map(|w| w.word()).collect();
+    match event {
+        E::Kept { workspace, windows } => E::Kept {
+            workspace: workspace.word(),
+            windows: words(windows),
+        },
+        E::Edited { workspace, windows } => E::Edited {
+            workspace: workspace.word(),
+            windows: words(windows),
+        },
+        E::Forgotten(workspace) => E::Forgotten(workspace.word()),
+        E::Cleared => E::Cleared,
+        E::ReconcileBegan => E::ReconcileBegan,
+        E::ReconcileEnded => E::ReconcileEnded,
+        E::RestoreAsked {
+            workspace,
+            returning,
+            current,
+            held,
+        } => E::RestoreAsked {
+            workspace: workspace.word(),
+            returning: returning.map(|w| w.word()),
+            current: match current {
+                Current::Unlaid => Current::Unlaid,
+                Current::Laid(candidates) => Current::Laid(
+                    (candidates.into_iter())
+                        .map(|c| Candidate {
+                            window: c.window.word(),
+                            in_workspace: c.in_workspace,
+                            present: c.present,
+                            floating: c.floating,
+                        })
+                        .collect(),
+                ),
+            },
+            held: words(held),
+        },
+    }
+}
+
+#[cfg(feature = "roc-core")]
+fn decided_words(
+    decided: rift_core::native_memory::Decided<WindowId, VirtualWorkspaceId>,
+) -> rift_core::native_memory::Decided<u64, u64> {
+    use rift_core::native_memory::{Decided, Decision};
+
+    use crate::roc_path::Word;
+    let words = |windows: Vec<WindowId>| windows.into_iter().map(|w| w.word()).collect();
+    match decided {
+        Decided::Nothing => Decided::Nothing,
+        Decided::Deferred => Decided::Deferred,
+        Decided::Restore(d) => Decided::Restore(Decision {
+            remove: words(d.remove),
+            ordered: words(d.ordered),
+            add: words(d.add),
+            spent: d.spent,
+        }),
+        Decided::Waited(waited) => Decided::Waited(waited.into_iter().map(|w| w.word()).collect()),
+    }
+}
+
+#[cfg(feature = "roc-core")]
+fn owned_words(
+    owned: rift_core::native_memory::Owned<VirtualWorkspaceId>,
+) -> rift_core::native_memory::Owned<u64> {
+    use rift_core::native_memory::{Batch, Owned};
+
+    use crate::roc_path::Word;
+    Owned {
+        held: owned.held.into_iter().map(|w| w.word()).collect(),
+        batch: match owned.batch {
+            Batch::Idle => Batch::Idle,
+            Batch::Collecting(waiting) => {
+                Batch::Collecting(waiting.into_iter().map(|w| w.word()).collect())
+            }
+        },
+    }
+}
+
 /// The floating state as the engine holds it (engine slice E2).
 pub(crate) type RiftFloats =
     rift_core::floats::Floats<WindowId, VirtualWorkspaceId, objc2_core_foundation::CGRect>;
@@ -1488,6 +1719,38 @@ mod tests {
             Some(2)
         );
         assert!(super::EVICTIONS_RESEEDS.load(std::sync::atomic::Ordering::Relaxed) > before);
+    }
+
+    /// A disagreement brings both sides to what they share: the shadow keeps only the snapshots
+    /// the Roc core holds, the Roc core forgets one the shadow has no value for; counted.
+    #[test]
+    fn a_native_reseed_brings_both_to_what_they_share_and_is_counted() {
+        use rift_core::native_memory::{Batch, MemoryEvent};
+        let mut native = super::TwinnedNative::<Vec<WindowId>>::default();
+        let mut workspaces = slotmap::SlotMap::<super::VirtualWorkspaceId, ()>::with_key();
+        let (both, roc_only, rust_only) = (
+            workspaces.insert(()),
+            workspaces.insert(()),
+            workspaces.insert(()),
+        );
+        let w = WindowId::new(3, 1);
+        for workspace in [both, roc_only] {
+            native.step(MemoryEvent::Kept { workspace, snapshot: vec![w] });
+        }
+        // The shadow loses one and gains one the Roc core never saw.
+        native.rust.step(MemoryEvent::Forgotten(roc_only));
+        native.rust.step(MemoryEvent::Kept {
+            workspace: rust_only,
+            snapshot: vec![w],
+        });
+        let before = super::NATIVE_RESEEDS.load(std::sync::atomic::Ordering::Relaxed);
+        let view = native.twin.roc.view();
+        native.reseed(view);
+        let held: Vec<_> = native.snapshots().map(|(workspace, _)| workspace).collect();
+        assert_eq!(held, [both]);
+        assert_eq!(super::owned_words(native.owned()), native.twin.roc.view());
+        assert_eq!(*native.batch(), Batch::Idle);
+        assert!(super::NATIVE_RESEEDS.load(std::sync::atomic::Ordering::Relaxed) > before);
     }
 
     /// An app quitting reaches the Roc core as the same app: its minimum goes in both.

@@ -207,8 +207,7 @@ impl LayoutEngine {
                 .workspaces
                 .remove(source)
                 .expect("workspace sources were validated before installation");
-            self.native
-                .step::<WindowId>(rift_core::native_memory::MemoryEvent::Forgotten(target));
+            self.native.step(rift_core::native_memory::MemoryEvent::Forgotten(target));
             let target_space = self
                 .workspaces
                 .reading(window_store.read())

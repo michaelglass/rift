@@ -127,6 +127,9 @@ fn show_roc_core() {
         let reseeds = crate::roc_twin::evictions_reseeds();
         println!("roc-core: evictions re-seeds: {reseeds}");
         tracing::info!(reseeds, "roc-core: evictions re-seeds");
+        let reseeds = crate::roc_twin::native_reseeds();
+        println!("roc-core: native memory re-seeds: {reseeds}");
+        tracing::info!(reseeds, "roc-core: native memory re-seeds");
         // The Rust BSP tree, the deciding Roc tree's shadow (re-seeded from it).
         let reseeds = crate::layout_engine::systems::bsp_tree_reseeds();
         println!("roc-core: bsp tree re-seeds: {reseeds}");
