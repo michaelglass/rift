@@ -148,6 +148,17 @@ pub(super) fn core_direction(direction: Direction) -> rift_core::layout::bsp_tre
     }
 }
 
+/// A core direction as the layout's (a Roc answer's directions, read back).
+#[cfg(feature = "roc-core")]
+pub(super) fn engine_direction(direction: rift_core::layout::bsp_tree::Direction) -> Direction {
+    match direction {
+        rift_core::layout::bsp_tree::Direction::Left => Direction::Left,
+        rift_core::layout::bsp_tree::Direction::Right => Direction::Right,
+        rift_core::layout::bsp_tree::Direction::Up => Direction::Up,
+        rift_core::layout::bsp_tree::Direction::Down => Direction::Down,
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub enum WindowQuery {
     All,

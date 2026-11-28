@@ -45,6 +45,10 @@ name = "workspaces"
 required-features = ["roc"]
 
 [[test]]
+name = "placement"
+required-features = ["roc"]
+
+[[test]]
 name = "modes"
 required-features = ["roc"]
 

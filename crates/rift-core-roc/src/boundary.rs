@@ -4213,6 +4213,267 @@ impl Drop for CamerasBox {
 }
 
 // ---------------------------------------------------------------------------------------------
+// The layout engine's drop choices.
+
+type DropActionOf = rift_core::placement::WindowDropAction<TreeDirection>;
+
+fn drop_action_wire(action: DropActionOf) -> abi::BoundaryDropActionWire {
+    use abi::BoundaryDropActionWireTag as Tag;
+    use rift_core::placement::WindowDropAction as A;
+    match action {
+        A::Swap => union!(
+            BoundaryDropActionWire,
+            BoundaryDropActionWirePayload.swap,
+            Tag::Swap
+        ),
+        A::Stack => union!(
+            BoundaryDropActionWire,
+            BoundaryDropActionWirePayload.stack,
+            Tag::Stack
+        ),
+        A::Insert(d) => union!(
+            BoundaryDropActionWire,
+            BoundaryDropActionWirePayload.insert(tree_direction(d)),
+            Tag::Insert
+        ),
+        A::Move(d) => union!(
+            BoundaryDropActionWire,
+            BoundaryDropActionWirePayload.r#move(tree_direction(d)),
+            Tag::Move
+        ),
+        A::ConsumeOrExpel(d) => union!(
+            BoundaryDropActionWire,
+            BoundaryDropActionWirePayload.consume_or_expel(tree_direction(d)),
+            Tag::ConsumeOrExpel
+        ),
+    }
+}
+
+fn from_drop_action_wire(action: &abi::BoundaryDropActionWire) -> DropActionOf {
+    use abi::BoundaryDropActionWireTag as Tag;
+    use rift_core::placement::WindowDropAction as A;
+    // SAFETY: each arm reads the payload its tag names.
+    match action.tag {
+        Tag::Swap => A::Swap,
+        Tag::Stack => A::Stack,
+        Tag::Insert => A::Insert(from_direction(unsafe {
+            *action.borrow_payload_insert_unchecked()
+        })),
+        Tag::Move => A::Move(from_direction(unsafe {
+            *action.borrow_payload_move_unchecked()
+        })),
+        Tag::ConsumeOrExpel => A::ConsumeOrExpel(from_direction(unsafe {
+            *action.borrow_payload_consume_or_expel_unchecked()
+        })),
+    }
+}
+
+fn maybe_rect(r: Option<Rect>) -> abi::BoundaryMaybeRect {
+    use abi::BoundaryMaybeRectTag as Tag;
+    match r {
+        Some(r) => union!(
+            BoundaryMaybeRect,
+            BoundaryMaybeRectPayload.some_rect(rect(r)),
+            Tag::SomeRect
+        ),
+        None => union!(BoundaryMaybeRect, BoundaryMaybeRectPayload.no_rect, Tag::NoRect),
+    }
+}
+
+fn arrangement_wire(a: rift_core::placement::Arrangement) -> abi::BoundaryArrangementWire {
+    use rift_core::placement::Arrangement as A;
+    match a {
+        A::Floating => abi::BoundaryArrangementWire::Floating,
+        A::Stack => abi::BoundaryArrangementWire::Stack,
+        A::Tiled => abi::BoundaryArrangementWire::Tiled,
+    }
+}
+
+fn maybe_slot(slot: Option<&Vec<usize>>, host: &abi::RocHost) -> abi::BoundaryMaybeSlot {
+    use abi::BoundaryMaybeSlotTag as Tag;
+    match slot {
+        Some(path) => {
+            let words: Vec<u64> = path.iter().map(|&i| i as u64).collect();
+            union!(
+                BoundaryMaybeSlot,
+                BoundaryMaybeSlotPayload.slot(list(&words, host)),
+                Tag::Slot
+            )
+        }
+        None => union!(BoundaryMaybeSlot, BoundaryMaybeSlotPayload.no_slot, Tag::NoSlot),
+    }
+}
+
+pub(crate) fn engine_drop_question(
+    question: rift_core::placement::DropQuestion<u64, u64, TreeDirection>,
+    host: &abi::RocHost,
+) -> abi::BoundaryDropQuestion {
+    use abi::BoundaryDropQuestionTag as Tag;
+    use rift_core::placement::{DropQuestion as Q, Laid};
+    match question {
+        Q::Plan(f) => {
+            use abi::BoundaryMaybeDropTargetTag as T;
+            let target = match f.target {
+                Some(t) => union!(
+                    BoundaryMaybeDropTarget,
+                    BoundaryMaybeDropTargetPayload.target(abi::BoundaryDropTargetWire {
+                        window: t.window,
+                        action: drop_action_wire(t.action),
+                        in_destination: t.in_destination,
+                        floating: t.floating,
+                    }),
+                    T::Target
+                ),
+                None => union!(
+                    BoundaryMaybeDropTarget,
+                    BoundaryMaybeDropTargetPayload.no_target,
+                    T::NoTarget
+                ),
+            };
+            union!(
+                BoundaryDropQuestion,
+                BoundaryDropQuestionPayload.plan(abi::BoundaryDropFactsWire {
+                    at: maybe_rect(f.at),
+                    destination: f.destination,
+                    frame: maybe_rect(f.frame),
+                    source: maybe_word(f.source),
+                    target,
+                    window: f.window,
+                    floating: f.floating,
+                    laid: match f.laid {
+                        Laid::NoSpace => abi::BoundaryLaidToken::NoSpace,
+                        Laid::NoLayout => abi::BoundaryLaidToken::NoLayout,
+                        Laid::Laid(()) => abi::BoundaryLaidToken::Laid,
+                    },
+                }),
+                Tag::Plan
+            )
+        }
+        Q::Kept(ask) => union!(
+            BoundaryDropQuestion,
+            BoundaryDropQuestionPayload.kept(abi::BoundaryKeptQuestion {
+                before: maybe_slot(ask.before.as_ref(), host),
+                after: maybe_slot(ask.after.as_ref(), host),
+            }),
+            Tag::Kept
+        ),
+        Q::Action(ask) => union!(
+            BoundaryDropQuestion,
+            BoundaryDropQuestionPayload.action(abi::BoundaryActionQuestion {
+                same_slot: ask.same_slot,
+                action: drop_action_wire(ask.action),
+                center: drop_action_wire(ask.center),
+            }),
+            Tag::Action
+        ),
+        Q::Override(ask) => {
+            use abi::BoundaryMaybeArrangementTag as T;
+            let shown = match ask.0 {
+                Some(a) => union!(
+                    BoundaryMaybeArrangement,
+                    BoundaryMaybeArrangementPayload.arranged(arrangement_wire(a)),
+                    T::Arranged
+                ),
+                None => union!(
+                    BoundaryMaybeArrangement,
+                    BoundaryMaybeArrangementPayload.no_arrangement,
+                    T::NoArrangement
+                ),
+            };
+            union!(
+                BoundaryDropQuestion,
+                BoundaryDropQuestionPayload.r#override(shown),
+                Tag::Override
+            )
+        }
+        Q::Edit(a) => union!(
+            BoundaryDropQuestion,
+            BoundaryDropQuestionPayload.edit(arrangement_wire(a)),
+            Tag::Edit
+        ),
+    }
+}
+
+pub(crate) fn engine_drop_choice(
+    choice: abi::BoundaryDropChoice,
+) -> rift_core::placement::DropChoice<u64, u64, TreeDirection> {
+    use abi::BoundaryDropChoiceTag as Tag;
+    use rift_core::placement::{
+        Across, DropChoice, DropEdit, DropPlan, DropRefusal as R, Kept, Override,
+    };
+    let across = |a: &abi::BoundaryAcrossWire| match a.tag {
+        abi::BoundaryAcrossWireTag::Same => Across::Same,
+        // SAFETY: the tag names the payload.
+        abi::BoundaryAcrossWireTag::Into => Across::Into {
+            from: unsafe { *a.borrow_payload_into_unchecked() },
+        },
+    };
+    // SAFETY: each arm reads the payload its tag names.
+    match choice.tag {
+        Tag::Plan => {
+            use abi::BoundaryDropPlanWireTag as P;
+            let plan = unsafe { choice.borrow_payload_plan_unchecked() };
+            DropChoice::Plan(match plan.tag {
+                P::Refused => {
+                    DropPlan::Refused(match unsafe { *plan.borrow_payload_refused_unchecked() } {
+                        abi::BoundaryDropRefusalWire::NotAMember => R::NotAMember,
+                        abi::BoundaryDropRefusalWire::NoDestination => R::NoDestination,
+                        abi::BoundaryDropRefusalWire::NoLayout => R::NoLayout,
+                        abi::BoundaryDropRefusalWire::FloatWithoutFrame => R::FloatWithoutFrame,
+                        abi::BoundaryDropRefusalWire::BadFrame => R::BadFrame,
+                        abi::BoundaryDropRefusalWire::FloatOntoTarget => R::FloatOntoTarget,
+                        abi::BoundaryDropRefusalWire::FloatUnmoved => R::FloatUnmoved,
+                        abi::BoundaryDropRefusalWire::TiledWithFrame => R::TiledWithFrame,
+                        abi::BoundaryDropRefusalWire::SelfInsert => R::SelfInsert,
+                        abi::BoundaryDropRefusalWire::ForeignTarget => R::ForeignTarget,
+                        abi::BoundaryDropRefusalWire::FloatingTarget => R::FloatingTarget,
+                        abi::BoundaryDropRefusalWire::InPlace => R::InPlace,
+                    })
+                }
+                P::Float => {
+                    let f = unsafe { plan.borrow_payload_float_unchecked() };
+                    DropPlan::Float {
+                        frame: from_rect(f.frame),
+                        across: across(&f.across),
+                        place: (),
+                    }
+                }
+                P::Relocate => DropPlan::Relocate {
+                    from: unsafe { *plan.borrow_payload_relocate_unchecked() },
+                    place: (),
+                },
+                P::Target => {
+                    let t = unsafe { plan.borrow_payload_target_unchecked() };
+                    DropPlan::Target {
+                        target: t.target,
+                        action: from_drop_action_wire(&t.action),
+                        across: across(&t.across),
+                        place: (),
+                    }
+                }
+            })
+        }
+        Tag::Kept => DropChoice::Kept(match unsafe { *choice.borrow_payload_kept_unchecked() } {
+            abi::BoundaryKeptAnswer::Unchanged => Kept::Unchanged,
+            abi::BoundaryKeptAnswer::Moved => Kept::Moved,
+        }),
+        Tag::Action => DropChoice::Action(from_drop_action_wire(unsafe {
+            choice.borrow_payload_action_unchecked()
+        })),
+        Tag::Override => {
+            DropChoice::Override(match unsafe { *choice.borrow_payload_override_unchecked() } {
+                abi::BoundaryOverrideAnswer::ByZone => Override::ByZone,
+                abi::BoundaryOverrideAnswer::Swap => Override::Swap,
+            })
+        }
+        Tag::Edit => DropChoice::Edit(match unsafe { *choice.borrow_payload_edit_unchecked() } {
+            abi::BoundaryDropEditAnswer::Refused => DropEdit::Refused,
+            abi::BoundaryDropEditAnswer::Edit => DropEdit::Edit,
+        }),
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
 // The layout engine's switching choices.
 
 pub(crate) fn engine_switching_question(

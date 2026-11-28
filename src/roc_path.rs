@@ -238,6 +238,11 @@ pub(crate) static LIFECYCLE: Family = Family::new();
 #[cfg(feature = "roc-core")]
 pub(crate) static WORKSPACES: Family = Family::new();
 
+/// The layout engine's placement questions (`rift_core::placement`, `EnginePlacement.roc`): the
+/// drop's choices.
+#[cfg(feature = "roc-core")]
+pub(crate) static PLACEMENT: Family = Family::new();
+
 /// The reconciler (`rift_core::RustCore` and the Roc core's `step`): every effect it decides.
 #[cfg(feature = "roc-core")]
 pub(crate) static RECONCILER: Family = Family::new();

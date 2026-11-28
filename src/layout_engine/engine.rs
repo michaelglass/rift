@@ -9,10 +9,10 @@ use rift_core::focus::{
 };
 use rift_core::native_memory::{Candidate, Current, Held as _, MemoryAnswer, MemoryEvent};
 use rift_core::placement::{
-    Across, Addition, AdditionFacts, Afterwards, Arrangement, Assign, Claim, DropEdit, DropFacts,
-    DropPlan, DropTarget, Edited, Family, Insert, Kept, Laid, Landing, Manage, MovedFocus,
-    NativeLayout, Observed, Override, Placed, Projection, Relocation, RelocationFacts, RuleFloat,
-    RuleWorkspace, Tree, Width, WindowMove, WorkspaceMove,
+    Across, Addition, AdditionFacts, Afterwards, Arrangement, Assign, Claim, DropAsk, DropEdit,
+    DropFacts, DropPlan, DropTarget, Edited, Family, Insert, Kept, Laid, Landing, Manage,
+    MovedFocus, NativeLayout, Observed, Override, Placed, Projection, Relocation, RelocationFacts,
+    RuleFloat, RuleWorkspace, Tree, Width, WindowMove, WorkspaceMove,
 };
 use rift_core::workspaces::{
     Arrival, ArrivalAsk, Moved, MovedAsk, SourceAfter, Switch, SwitchAsk, WorkspaceAsk,
@@ -58,7 +58,11 @@ impl DropPreview {
         action: crate::layout_engine::WindowDropAction,
         center: crate::common::config::MouseDropAction,
     ) -> crate::layout_engine::WindowDropAction {
-        rift_core::placement::drop_action(self.same_slot, action, center.into())
+        LayoutEngine::dropping(&rift_core::placement::ActionAsk {
+            same_slot: self.same_slot,
+            action,
+            center: center.into(),
+        })
     }
 }
 
@@ -325,7 +329,7 @@ impl LayoutEngine {
         windows: Windows<'_>,
         request: crate::layout_engine::WindowDropRequest,
     ) -> bool {
-        match rift_core::placement::drop_edit(self.drop_arrangement(windows, request.space)) {
+        match Self::dropping(&self.drop_arrangement(windows, request.space)) {
             DropEdit::Refused => return false,
             DropEdit::Edit => {}
         }
@@ -348,6 +352,45 @@ impl LayoutEngine {
 
     /// Validate a prospective drop on a workspace-local tree before touching membership.
     /// The regular relocation and target-drop primitives perform the committed operation.
+    /// One of the engine's drop choices, answered in its own kind: the Rust core's answer, and
+    /// under `roc-core` the Roc core's, which decides. The payloads the engine holds (the place,
+    /// the trees) never cross: Roc names the variant, and the engine puts its payload back. A Roc
+    /// answer of another kind, or naming a payload the engine does not hold, is a difference like
+    /// any other (reported; the Rust answer stands).
+    pub(crate) fn dropping<A: DropAsk<WindowId, VirtualWorkspaceId, Direction>>(
+        ask: &A,
+    ) -> A::Answer {
+        let rust = ask.answer();
+        #[cfg(feature = "roc-core")]
+        let rust = {
+            use super::systems::{core_direction, engine_direction};
+            use crate::roc_path::Word;
+            let words = ask.question().map(Word::word, Word::word, core_direction);
+            let roc = rift_core_roc::placement::engine_drop(words.clone());
+            let rust_words = A::choice(&rust)
+                .map(|w| Some(w.word()), |k| Some(k.word()), core_direction)
+                .expect("words for every id");
+            crate::roc_path::decided(
+                &crate::roc_path::PLACEMENT,
+                "engine_drop",
+                &[],
+                &words,
+                rust,
+                &rust_words,
+                Ok(roc),
+                |roc| {
+                    let roc = roc.map(
+                        crate::roc_path::window_of_word,
+                        crate::roc_path::FromWord::from_word,
+                        engine_direction,
+                    )?;
+                    ask.of(roc)
+                },
+            )
+        };
+        rust
+    }
+
     /// The layout family a tile drop on `space` reads: its shown workspace's layout mode.
     fn drop_arrangement(&self, windows: Windows<'_>, space: SpaceId) -> Arrangement {
         match self.active_layout_mode_at(windows, space) {
@@ -397,7 +440,7 @@ impl LayoutEngine {
         drop: &crate::layout_engine::WorkspaceDropRequest,
     ) -> bool {
         let destination = drop.workspace;
-        let plan = rift_core::placement::drop_plan(self.drop_facts(windows.read(), drop));
+        let plan = Self::dropping(&self.drop_facts(windows.read(), drop));
         let space = match plan {
             DropPlan::Refused(reason) => {
                 debug!(?reason, window = ?drop.window, "drop refused");
@@ -446,10 +489,11 @@ impl LayoutEngine {
                 else {
                     return false;
                 };
-                match rift_core::placement::target_kept(
+                let kept = rift_core::placement::KeptAsk {
                     before,
-                    tree.window_slot(layout, drop.window),
-                ) {
+                    after: tree.window_slot(layout, drop.window),
+                };
+                match Self::dropping(&kept) {
                     Kept::Unchanged => return false,
                     Kept::Moved => {}
                 }
@@ -539,7 +583,7 @@ impl LayoutEngine {
                 _ => Arrangement::Tiled,
             }
         });
-        rift_core::placement::drop_override(shown)
+        Self::dropping(&rift_core::placement::OverrideAsk(shown))
     }
 
     pub(crate) fn drop_preview_frame(
@@ -4970,6 +5014,79 @@ mod tests {
             rift_core::placement::drop_plan(facts),
             DropPlan::Refused(rift_core::placement::DropRefusal::FloatingTarget)
         );
+    }
+
+    /// Every kind of drop question through the engine's one door, each answer in its own kind;
+    /// under `roc-core` the Roc core answers too (a difference, an answer of another kind, or a
+    /// plan naming a place the facts do not give, fails here).
+    #[test]
+    fn each_drop_question_answers_in_its_own_kind() {
+        use rift_core::placement::{ActionAsk, DropRefusal, KeptAsk, OverrideAsk};
+
+        use crate::layout_engine::WindowDropAction as A;
+        let (window, other) = (WindowId::new(7, 1), WindowId::new(7, 2));
+        let mut workspaces: slotmap::SlotMap<VirtualWorkspaceId, ()> = slotmap::SlotMap::with_key();
+        let (here, there) = (workspaces.insert(()), workspaces.insert(()));
+        let mut layouts: slotmap::SlotMap<LayoutId, ()> = slotmap::SlotMap::with_key();
+        let place = (SpaceId::new(1), layouts.insert(()));
+        let facts = DropFacts {
+            window,
+            source: Some(there),
+            destination: here,
+            laid: Laid::Laid(place),
+            floating: false,
+            at: None,
+            frame: None,
+            target: None,
+        };
+        assert_eq!(LayoutEngine::dropping(&facts), DropPlan::Relocate {
+            from: there,
+            place
+        });
+        for (laid, refusal) in [
+            (Laid::NoLayout, DropRefusal::NoLayout),
+            (Laid::NoSpace, DropRefusal::NoDestination),
+        ] {
+            assert_eq!(
+                LayoutEngine::dropping(&DropFacts { laid, ..facts }),
+                DropPlan::Refused(refusal)
+            );
+        }
+        let target = DropTarget {
+            window: other,
+            action: A::Insert(Direction::Left),
+            in_destination: true,
+            floating: false,
+        };
+        assert_eq!(
+            LayoutEngine::dropping(&DropFacts { target: Some(target), ..facts }),
+            DropPlan::Target {
+                target: other,
+                action: A::Insert(Direction::Left),
+                across: Across::Into { from: there },
+                place
+            }
+        );
+        let slot = || Some(vec![0, 1]);
+        assert_eq!(
+            LayoutEngine::dropping(&KeptAsk { before: slot(), after: slot() }),
+            Kept::Unchanged
+        );
+        assert_eq!(
+            LayoutEngine::dropping(&KeptAsk { before: slot(), after: None }),
+            Kept::Moved
+        );
+        let action = ActionAsk {
+            same_slot: true,
+            action: A::Insert(Direction::Up),
+            center: A::Stack,
+        };
+        assert_eq!(LayoutEngine::dropping(&action), A::Stack);
+        assert_eq!(
+            LayoutEngine::dropping(&OverrideAsk(Some(Arrangement::Stack))),
+            Override::Swap
+        );
+        assert_eq!(LayoutEngine::dropping(&Arrangement::Floating), DropEdit::Refused);
     }
 
     /// A stack layout swaps on every zone; a floating layout takes no tile drops.

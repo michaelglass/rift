@@ -1021,6 +1021,53 @@ Boundary := [].{
 
 	NativeBatchView := [Idle, Collecting(List(U64))]
 
+	# The layout engine's drop choices (`rift_core::placement::choose_drop`): windows and
+	# workspaces are one word each; the place and the trees the engine holds are tokens.
+
+	DropActionWire := [Swap, Stack, Insert(BspDirection), Move(BspDirection), ConsumeOrExpel(BspDirection)]
+
+	LaidToken := [NoSpace, NoLayout, Laid]
+
+	MaybeRect := [NoRect, SomeRect(Rect)]
+
+	DropTargetWire := { window : U64, action : DropActionWire, in_destination : Bool, floating : Bool }
+
+	MaybeDropTarget := [NoTarget, Target(DropTargetWire)]
+
+	DropFactsWire := { window : U64, source : MaybeWord, destination : U64, laid : LaidToken, floating : Bool, at : MaybeRect, frame : MaybeRect, target : MaybeDropTarget }
+
+	MaybeSlot := [NoSlot, Slot(List(U64))]
+
+	KeptQuestion := { before : MaybeSlot, after : MaybeSlot }
+
+	ActionQuestion := { same_slot : Bool, action : DropActionWire, center : DropActionWire }
+
+	ArrangementWire := [Floating, Stack, Tiled]
+
+	MaybeArrangement := [NoArrangement, Arranged(ArrangementWire)]
+
+	## One of the layout engine's drop choices.
+	DropQuestion := [Plan(DropFactsWire), Kept(KeptQuestion), Action(ActionQuestion), Override(MaybeArrangement), Edit(ArrangementWire)]
+
+	DropRefusalWire := [NotAMember, NoDestination, NoLayout, FloatWithoutFrame, BadFrame, FloatOntoTarget, FloatUnmoved, TiledWithFrame, SelfInsert, ForeignTarget, FloatingTarget, InPlace]
+
+	AcrossWire := [Same, Into(U64)]
+
+	FloatPlan := { frame : Rect, across : AcrossWire }
+
+	TargetPlan := { target : U64, action : DropActionWire, across : AcrossWire }
+
+	DropPlanWire := [Refused(DropRefusalWire), Float(FloatPlan), Relocate(U64), Target(TargetPlan)]
+
+	KeptAnswer := [Unchanged, Moved]
+
+	OverrideAnswer := [ByZone, Swap]
+
+	DropEditAnswer := [Refused, Edit]
+
+	## A drop choice's answer.
+	DropChoice := [Plan(DropPlanWire), Kept(KeptAnswer), Action(DropActionWire), Override(OverrideAnswer), Edit(DropEditAnswer)]
+
 	# The layout engine's switching choices (`rift_core::workspaces::choose_switching`):
 	# workspaces and Spaces are one word each.
 

@@ -1344,7 +1344,29 @@ functions**, in `rift_core::placement` (the frame request in `rift_core::floats`
   rule unfloating a window, a floating toggle's centring and smart size.
 - Plants 27/27 (fifteen core, twelve engine; nine engine plants survived until those tests existed).
 
-- Next: E1c-4 (one Roc entry for E1c, typed per kind).
+**E1c-4 (approved 2026-11-28): E1c's choices in Roc, in three parts** (4a the drop, 4b relocation,
+4c the rest). Payloads the engine holds (the place, the trees, a rule's placement) never cross:
+the wire carries a token ("there is a place", "there is a tree"), Roc names the variant and the
+words, and the engine puts its payload back in the typed ask's `of`. A Roc answer naming a payload
+the engine does not hold reads as nothing there, so it is a difference like an answer of another
+kind (reported; the Rust answer stands): the same rule as Spans and the native snapshots.
+
+**E1c-4a (2026-11-28): the drop's choices decide in Roc.** `rift_core::placement::DropAsk` (one
+per kind: `DropFacts` → `DropPlan<P>`, `KeptAsk` → `Kept`, `ActionAsk` → the action, `OverrideAsk`
+→ `Override`, `Arrangement` → `DropEdit`), the wire form `DropQuestion`/`DropChoice` with the place
+as a token (`DropFacts::without_place`, `DropPlan::with_place`), behind one Roc entry
+(`roc_engine_drop`, `roc/core/EnginePlacement.roc`). The engine's door is `LayoutEngine::dropping`,
+a new family `PLACEMENT` (reported with the others at exit). A slot crosses as its path (a list of
+words).
+- Differential (`rift-core-roc/tests/placement.rs`): 20 000 random questions of every kind (frames
+  unusable one time in four: zero, negative, not finite); check-fast cuts it to 2000.
+- Tests: every kind reads only its own kind of choice, and an accepted plan the facts give no place
+  for reads as nothing (rift-core); every kind through the engine's door, Roc answering.
+- Plants 13/13, among them the part's payload plant: a Roc drop accepted with no layout (a place the
+  engine does not hold), caught at the engine's door; and an Edit question answered with an
+  Override.
+
+- Next: E1c-4b (relocation in Roc).
 
 **Pruning (the lead, 2026-11-26):** at a milestone, delete only what no future build reuses:
 stale `target/roc-build` keys (all but the current sources', which the build script's line

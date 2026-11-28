@@ -254,6 +254,357 @@ pub fn target_kept<T: PartialEq>(before: Option<T>, after: Option<T>) -> Kept {
     }
 }
 
+impl<D> WindowDropAction<D> {
+    /// The action with its direction renamed.
+    pub fn map<D2>(self, d: impl FnOnce(D) -> D2) -> WindowDropAction<D2> {
+        match self {
+            WindowDropAction::Swap => WindowDropAction::Swap,
+            WindowDropAction::Stack => WindowDropAction::Stack,
+            WindowDropAction::Insert(x) => WindowDropAction::Insert(d(x)),
+            WindowDropAction::Move(x) => WindowDropAction::Move(d(x)),
+            WindowDropAction::ConsumeOrExpel(x) => WindowDropAction::ConsumeOrExpel(d(x)),
+        }
+    }
+}
+
+impl<W, K, D, P> DropFacts<W, K, D, P> {
+    /// The facts with the place replaced by a token: a twin decides on whether there is one,
+    /// never on the place itself.
+    pub fn without_place(self) -> DropFacts<W, K, D, ()> {
+        DropFacts {
+            window: self.window,
+            source: self.source,
+            destination: self.destination,
+            laid: match self.laid {
+                Laid::NoSpace => Laid::NoSpace,
+                Laid::NoLayout => Laid::NoLayout,
+                Laid::Laid(_) => Laid::Laid(()),
+            },
+            floating: self.floating,
+            at: self.at,
+            frame: self.frame,
+            target: self.target,
+        }
+    }
+
+    /// The facts with their windows, workspaces and directions renamed.
+    pub fn map<W2, K2, D2>(
+        self,
+        w: impl Fn(W) -> W2,
+        k: impl Fn(K) -> K2,
+        d: impl Fn(D) -> D2,
+    ) -> DropFacts<W2, K2, D2, P> {
+        DropFacts {
+            window: w(self.window),
+            source: self.source.map(&k),
+            destination: k(self.destination),
+            laid: self.laid,
+            floating: self.floating,
+            at: self.at,
+            frame: self.frame,
+            target: self.target.map(|t| DropTarget {
+                window: w(t.window),
+                action: t.action.map(&d),
+                in_destination: t.in_destination,
+                floating: t.floating,
+            }),
+        }
+    }
+}
+
+impl<W, K, D, P> DropPlan<W, K, D, P> {
+    /// The plan without its place (the wire form).
+    pub fn without_place(self) -> DropPlan<W, K, D, ()> {
+        match self {
+            DropPlan::Refused(r) => DropPlan::Refused(r),
+            DropPlan::Float { frame, across, .. } => DropPlan::Float { frame, across, place: () },
+            DropPlan::Relocate { from, .. } => DropPlan::Relocate { from, place: () },
+            DropPlan::Target { target, action, across, .. } => DropPlan::Target {
+                target,
+                action,
+                across,
+                place: (),
+            },
+        }
+    }
+}
+
+impl<W, K, D> DropPlan<W, K, D, ()> {
+    /// A wire plan with the engine's place put back; none if it accepts a drop the facts give
+    /// no place for (a twin naming a payload the engine does not hold).
+    pub fn with_place<P>(self, laid: Laid<P>) -> Option<DropPlan<W, K, D, P>> {
+        match (self, laid) {
+            (DropPlan::Refused(r), _) => Some(DropPlan::Refused(r)),
+            (_, Laid::NoSpace | Laid::NoLayout) => None,
+            (DropPlan::Float { frame, across, .. }, Laid::Laid(place)) => {
+                Some(DropPlan::Float { frame, across, place })
+            }
+            (DropPlan::Relocate { from, .. }, Laid::Laid(place)) => {
+                Some(DropPlan::Relocate { from, place })
+            }
+            (DropPlan::Target { target, action, across, .. }, Laid::Laid(place)) => {
+                Some(DropPlan::Target { target, action, across, place })
+            }
+        }
+    }
+
+    /// The plan with its windows, workspaces and directions renamed; none where a word names
+    /// nothing.
+    pub fn map<W2, K2, D2>(
+        self,
+        w: impl Fn(W) -> Option<W2>,
+        k: impl Fn(K) -> Option<K2>,
+        d: impl Fn(D) -> D2,
+    ) -> Option<DropPlan<W2, K2, D2, ()>> {
+        let across = |a: Across<K>| -> Option<Across<K2>> {
+            Some(match a {
+                Across::Same => Across::Same,
+                Across::Into { from } => Across::Into { from: k(from)? },
+            })
+        };
+        Some(match self {
+            DropPlan::Refused(r) => DropPlan::Refused(r),
+            DropPlan::Float { frame, across: a, .. } => DropPlan::Float {
+                frame,
+                across: across(a)?,
+                place: (),
+            },
+            DropPlan::Relocate { from, .. } => DropPlan::Relocate { from: k(from)?, place: () },
+            DropPlan::Target { target, action, across: a, .. } => DropPlan::Target {
+                target: w(target)?,
+                action: action.map(d),
+                across: across(a)?,
+                place: (),
+            },
+        })
+    }
+}
+
+/// The layout engine's drop choices, as a question (the wire form a Roc core answers):
+/// payloads the engine holds (the place, the trees) are tokens.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DropQuestion<W, K, D> {
+    Plan(DropFacts<W, K, D, ()>),
+    Kept(KeptAsk),
+    Action(ActionAsk<D>),
+    Override(OverrideAsk),
+    Edit(Arrangement),
+}
+
+/// A drop choice's answer, in its wire form.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum DropChoice<W, K, D> {
+    Plan(DropPlan<W, K, D, ()>),
+    Kept(Kept),
+    Action(WindowDropAction<D>),
+    Override(Override),
+    Edit(DropEdit),
+}
+
+/// The answer to `question` (the wire form's), from the functions above.
+pub fn choose_drop<W: Copy + PartialEq, K: Copy + PartialEq, D: Copy>(
+    question: DropQuestion<W, K, D>,
+) -> DropChoice<W, K, D> {
+    match question {
+        DropQuestion::Plan(facts) => DropChoice::Plan(drop_plan(facts)),
+        DropQuestion::Kept(ask) => DropChoice::Kept(ask.answer_kept()),
+        DropQuestion::Action(ask) => {
+            DropChoice::Action(drop_action(ask.same_slot, ask.action, ask.center))
+        }
+        DropQuestion::Override(ask) => DropChoice::Override(drop_override(ask.0)),
+        DropQuestion::Edit(arrangement) => DropChoice::Edit(drop_edit(arrangement)),
+    }
+}
+
+impl<W: Copy, K: Copy, D: Copy> DropQuestion<W, K, D> {
+    /// The question with its windows, workspaces and directions renamed.
+    pub fn map<W2, K2, D2>(
+        self,
+        w: impl Fn(W) -> W2,
+        k: impl Fn(K) -> K2,
+        d: impl Fn(D) -> D2,
+    ) -> DropQuestion<W2, K2, D2> {
+        match self {
+            DropQuestion::Plan(facts) => DropQuestion::Plan(facts.map(w, k, d)),
+            DropQuestion::Kept(ask) => DropQuestion::Kept(ask),
+            DropQuestion::Action(ask) => DropQuestion::Action(ActionAsk {
+                same_slot: ask.same_slot,
+                action: ask.action.map(&d),
+                center: ask.center.map(&d),
+            }),
+            DropQuestion::Override(ask) => DropQuestion::Override(ask),
+            DropQuestion::Edit(arrangement) => DropQuestion::Edit(arrangement),
+        }
+    }
+}
+
+impl<W, K, D> DropChoice<W, K, D> {
+    /// The answer with its words renamed; none where a word names nothing.
+    pub fn map<W2, K2, D2>(
+        self,
+        w: impl Fn(W) -> Option<W2>,
+        k: impl Fn(K) -> Option<K2>,
+        d: impl Fn(D) -> D2,
+    ) -> Option<DropChoice<W2, K2, D2>> {
+        Some(match self {
+            DropChoice::Plan(plan) => DropChoice::Plan(plan.map(w, k, d)?),
+            DropChoice::Kept(kept) => DropChoice::Kept(kept),
+            DropChoice::Action(action) => DropChoice::Action(action.map(d)),
+            DropChoice::Override(o) => DropChoice::Override(o),
+            DropChoice::Edit(e) => DropChoice::Edit(e),
+        })
+    }
+}
+
+/// [`target_kept`]'s facts: the window's slot (a path in the tree) before and after.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeptAsk {
+    pub before: Option<Vec<usize>>,
+    pub after: Option<Vec<usize>>,
+}
+
+impl KeptAsk {
+    fn answer_kept(&self) -> Kept { target_kept(self.before.as_ref(), self.after.as_ref()) }
+}
+
+/// [`drop_action`]'s facts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ActionAsk<D> {
+    pub same_slot: bool,
+    pub action: WindowDropAction<D>,
+    pub center: WindowDropAction<D>,
+}
+
+/// [`drop_override`]'s fact: the shown workspace's arrangement (none: no workspace).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OverrideAsk(pub Option<Arrangement>);
+
+/// One kind of drop question with its own answer: callers see `Answer`, never a
+/// [`DropChoice`]. `of` reads only a choice of its own kind, and puts back the payloads the
+/// engine holds (none: a twin's bug, its answer of another kind or naming a payload the engine
+/// does not hold).
+pub trait DropAsk<W, K, D> {
+    type Answer: PartialEq + std::fmt::Debug;
+    /// The Rust core's answer.
+    fn answer(&self) -> Self::Answer;
+    /// The question in its wire form.
+    fn question(&self) -> DropQuestion<W, K, D>;
+    /// An answer in its wire form.
+    fn choice(answer: &Self::Answer) -> DropChoice<W, K, D>;
+    /// A wire answer as this kind's answer, its payloads put back.
+    fn of(&self, choice: DropChoice<W, K, D>) -> Option<Self::Answer>;
+}
+
+impl<
+    W: Copy + PartialEq + std::fmt::Debug,
+    K: Copy + PartialEq + std::fmt::Debug,
+    D: Copy + PartialEq + std::fmt::Debug,
+    P: Copy + PartialEq + std::fmt::Debug,
+> DropAsk<W, K, D> for DropFacts<W, K, D, P>
+{
+    type Answer = DropPlan<W, K, D, P>;
+
+    fn answer(&self) -> Self::Answer { drop_plan(*self) }
+
+    fn question(&self) -> DropQuestion<W, K, D> { DropQuestion::Plan(self.without_place()) }
+
+    fn choice(answer: &Self::Answer) -> DropChoice<W, K, D> {
+        DropChoice::Plan(answer.without_place())
+    }
+
+    fn of(&self, choice: DropChoice<W, K, D>) -> Option<Self::Answer> {
+        match choice {
+            DropChoice::Plan(plan) => plan.with_place(self.laid),
+            DropChoice::Kept(_)
+            | DropChoice::Action(_)
+            | DropChoice::Override(_)
+            | DropChoice::Edit(_) => None,
+        }
+    }
+}
+
+impl<W, K, D> DropAsk<W, K, D> for KeptAsk {
+    type Answer = Kept;
+
+    fn answer(&self) -> Kept { self.answer_kept() }
+
+    fn question(&self) -> DropQuestion<W, K, D> { DropQuestion::Kept(self.clone()) }
+
+    fn choice(answer: &Kept) -> DropChoice<W, K, D> { DropChoice::Kept(*answer) }
+
+    fn of(&self, choice: DropChoice<W, K, D>) -> Option<Kept> {
+        match choice {
+            DropChoice::Kept(kept) => Some(kept),
+            DropChoice::Plan(_)
+            | DropChoice::Action(_)
+            | DropChoice::Override(_)
+            | DropChoice::Edit(_) => None,
+        }
+    }
+}
+
+impl<W, K, D: Copy + PartialEq + std::fmt::Debug> DropAsk<W, K, D> for ActionAsk<D> {
+    type Answer = WindowDropAction<D>;
+
+    fn answer(&self) -> WindowDropAction<D> {
+        drop_action(self.same_slot, self.action, self.center)
+    }
+
+    fn question(&self) -> DropQuestion<W, K, D> { DropQuestion::Action(*self) }
+
+    fn choice(answer: &WindowDropAction<D>) -> DropChoice<W, K, D> { DropChoice::Action(*answer) }
+
+    fn of(&self, choice: DropChoice<W, K, D>) -> Option<WindowDropAction<D>> {
+        match choice {
+            DropChoice::Action(action) => Some(action),
+            DropChoice::Plan(_)
+            | DropChoice::Kept(_)
+            | DropChoice::Override(_)
+            | DropChoice::Edit(_) => None,
+        }
+    }
+}
+
+impl<W, K, D> DropAsk<W, K, D> for OverrideAsk {
+    type Answer = Override;
+
+    fn answer(&self) -> Override { drop_override(self.0) }
+
+    fn question(&self) -> DropQuestion<W, K, D> { DropQuestion::Override(*self) }
+
+    fn choice(answer: &Override) -> DropChoice<W, K, D> { DropChoice::Override(*answer) }
+
+    fn of(&self, choice: DropChoice<W, K, D>) -> Option<Override> {
+        match choice {
+            DropChoice::Override(o) => Some(o),
+            DropChoice::Plan(_)
+            | DropChoice::Kept(_)
+            | DropChoice::Action(_)
+            | DropChoice::Edit(_) => None,
+        }
+    }
+}
+
+impl<W, K, D> DropAsk<W, K, D> for Arrangement {
+    type Answer = DropEdit;
+
+    fn answer(&self) -> DropEdit { drop_edit(*self) }
+
+    fn question(&self) -> DropQuestion<W, K, D> { DropQuestion::Edit(*self) }
+
+    fn choice(answer: &DropEdit) -> DropChoice<W, K, D> { DropChoice::Edit(*answer) }
+
+    fn of(&self, choice: DropChoice<W, K, D>) -> Option<DropEdit> {
+        match choice {
+            DropChoice::Edit(e) => Some(e),
+            DropChoice::Plan(_)
+            | DropChoice::Kept(_)
+            | DropChoice::Action(_)
+            | DropChoice::Override(_) => None,
+        }
+    }
+}
+
 /// Why a window is relocated, which decides how its floating state travels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Policy<D, T> {
@@ -1313,6 +1664,51 @@ mod tests {
         assert_eq!(rule_frame(Some('p'), Some('r')), RuleFrame::Place('p'));
         assert_eq!(rule_frame(None::<char>, Some('r')), RuleFrame::Resize('r'));
         assert_eq!(rule_frame(None::<char>, None::<char>), RuleFrame::Keep);
+    }
+
+    /// Every drop kind reads only a choice of its own kind, and a plan accepting a drop the
+    /// facts give no place for reads as nothing (a payload the engine does not hold).
+    #[test]
+    fn a_drop_choice_of_another_kind_or_without_a_place_reads_as_nothing() {
+        type C = DropChoice<u32, u32, u8>;
+        let plan = C::Plan(DropPlan::Relocate { from: 11, place: () });
+        let all = [
+            plan,
+            C::Kept(Kept::Moved),
+            C::Action(A::Swap),
+            C::Override(Override::Swap),
+            C::Edit(DropEdit::Edit),
+        ];
+        fn reads<X: DropAsk<u32, u32, u8>>(ask: &X, choices: &[C]) -> Vec<bool> {
+            choices.iter().map(|&c| ask.of(c).is_some()).collect()
+        }
+        let only = |i: usize| (0..5).map(|j| j == i).collect::<Vec<_>>();
+        let facts = tiled(None);
+        assert_eq!(reads(&facts, &all), only(0));
+        assert_eq!(
+            facts.of(plan),
+            Some(DropPlan::Relocate { from: 11, place: "here" })
+        );
+        let unlaid = DropFacts { laid: Laid::NoLayout, ..facts };
+        assert_eq!(
+            unlaid.of(plan),
+            None,
+            "an accepted plan the facts give no place for"
+        );
+        let refused = C::Plan(DropPlan::Refused(DropRefusal::NoLayout));
+        assert_eq!(
+            unlaid.of(refused),
+            Some(DropPlan::Refused(DropRefusal::NoLayout))
+        );
+        assert_eq!(reads(&KeptAsk { before: None, after: None }, &all), only(1));
+        let action = ActionAsk {
+            same_slot: false,
+            action: A::Swap,
+            center: A::Stack,
+        };
+        assert_eq!(reads(&action, &all), only(2));
+        assert_eq!(reads(&OverrideAsk(None), &all), only(3));
+        assert_eq!(reads(&Arrangement::Tiled, &all), only(4));
     }
 
     #[test]

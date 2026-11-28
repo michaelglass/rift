@@ -2511,6 +2511,25 @@ pub mod lifecycle {
 
 /// The workspace decisions and steps (`rift_core::workspaces`) decided by the Roc core. The
 /// steps answer with what a run leaves, as views of the Rust core's state.
+/// The layout engine's placement choices (`rift_core::placement`).
+pub mod placement {
+    use rift_core::layout::bsp_tree::Direction;
+    use rift_core::placement::{DropChoice, DropQuestion};
+
+    use crate::{abi, boundary, host};
+
+    /// One of the layout engine's drop choices (`rift_core::placement::choose_drop`): every fact
+    /// is in the question, so it is always decided.
+    pub fn engine_drop(
+        question: DropQuestion<u64, u64, Direction>,
+    ) -> DropChoice<u64, u64, Direction> {
+        let host = host();
+        let question = boundary::engine_drop_question(question, &host);
+        // SAFETY: the question is handed to Roc, which consumes it; the choice is plain data.
+        boundary::engine_drop_choice(unsafe { abi::roc_engine_drop(question) })
+    }
+}
+
 pub mod workspaces {
     use rift_core::plain::Unasked;
     use rift_core::workspaces::plain::{
