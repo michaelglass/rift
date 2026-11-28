@@ -96,3 +96,7 @@ rift-core-roc = { path = ".", features = ["count-allocations"] }
 [[test]]
 name = "display_memory"
 required-features = ["roc"]
+
+[[test]]
+name = "evictions"
+required-features = ["roc"]

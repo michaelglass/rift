@@ -251,7 +251,7 @@ impl PersistedLayout {
             scroll_boundary: None,
             native_layouts: HashMap::default(),
             native_reconcile_batch: None,
-            evicted: HashMap::default(),
+            evicted: Default::default(),
             shadow_passes: Default::default(),
             floats: crate::layout_engine::floating::EngineFloats::loaded(self.floating),
             app_rules: AppRuleEngine::default(),

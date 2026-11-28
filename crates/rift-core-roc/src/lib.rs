@@ -401,6 +401,39 @@ impl RocDisplayMemory {
     }
 }
 
+/// Where a display's departure moved windows from (`rift_core::evictions::Evictions`), kept in
+/// Roc between events. Stepped beside the Rust machine, it must hold the same records. Windows,
+/// displays and workspaces are words, pids i32.
+pub struct RocEvictions {
+    evictions: boundary::EvictionsBox,
+    host: abi::RocHost,
+}
+
+// SAFETY: as for `RocCore`.
+unsafe impl Send for RocEvictions {}
+
+impl Default for RocEvictions {
+    fn default() -> Self {
+        RocEvictions {
+            evictions: boundary::EvictionsBox::empty(),
+            host: host(),
+        }
+    }
+}
+
+impl RocEvictions {
+    /// As `Evictions::step`.
+    pub fn step(&mut self, event: rift_core::evictions::EvictionEvent<u64, i32, u64, u64>) {
+        boundary::in_place(&mut self.evictions, |evictions| evictions.step(event))
+    }
+
+    /// Every record, as a Rust `Evictions`.
+    pub fn view(&mut self) -> rift_core::evictions::Evictions<u64, u64, u64> {
+        let host = &self.host;
+        boundary::in_place(&mut self.evictions, |evictions| evictions.view(host))
+    }
+}
+
 /// The floating state (`rift_core::floats::Floats`) kept in Roc between events. Stepped beside
 /// the Rust machine, it must hold the same state. Windows and workspaces are words, pids i32,
 /// frames plain rects.

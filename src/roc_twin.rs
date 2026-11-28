@@ -77,6 +77,17 @@ pub(crate) fn displays_reseeds() -> u64 {
     DISPLAYS_RESEEDS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// How many times the evictions' Rust shadow was re-seeded from the Roc core.
+#[cfg(feature = "roc-core")]
+static EVICTIONS_RESEEDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How many times the evictions' Rust shadow has been re-seeded from the Roc core (each one a
+/// `roc-divergence:` warned).
+#[cfg(feature = "roc-core")]
+pub(crate) fn evictions_reseeds() -> u64 {
+    EVICTIONS_RESEEDS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// How many times the joined workspaces' Rust shadow was re-seeded from the Roc core.
 #[cfg(feature = "roc-core")]
 static WORKSPACES_RESEEDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -835,7 +846,7 @@ pub(crate) type RiftDisplayEvent = rift_core::display_memory::DisplayEvent<Space
 /// Each Space's display and each display's last Space (engine slice E3), with its Roc twin under
 /// `roc-core`. Flipped (policy (a)): under `roc-core` the Roc core decides and the Rust machine is
 /// its shadow, read through `Deref` and re-seeded on any difference. A display crosses as a word:
-/// its place in the twin's table of display names, which only grows.
+/// its place in the twin's table of display names (`DisplayNames`).
 #[derive(Default)]
 pub(crate) struct TwinnedDisplays {
     rust: RiftDisplays,
@@ -847,23 +858,37 @@ pub(crate) struct TwinnedDisplays {
 #[derive(Default)]
 struct DisplaysTwin {
     roc: rift_core_roc::RocDisplayMemory,
-    names: Vec<String>,
+    names: DisplayNames,
     steps: u64,
 }
 
+/// Display names as the Roc core's words: each name's place in the table. The table only grows,
+/// and that is fine: it is bounded by the displays this process has ever seen, a handful.
 #[cfg(feature = "roc-core")]
-impl DisplaysTwin {
+#[derive(Default)]
+struct DisplayNames(Vec<String>);
+
+#[cfg(feature = "roc-core")]
+impl DisplayNames {
     /// `display`'s word: its place in the table, added if new.
     fn word(&mut self, display: &str) -> u64 {
-        let place = match self.names.iter().position(|named| named == display) {
+        let place = match self.0.iter().position(|named| named == display) {
             Some(place) => place,
             None => {
-                self.names.push(display.to_owned());
-                self.names.len() - 1
+                self.0.push(display.to_owned());
+                self.0.len() - 1
             }
         };
         place as u64
     }
+
+    /// The name of `word`; every word the Roc core holds came from this table.
+    fn name(&self, word: u64) -> String { self.0[word as usize].clone() }
+}
+
+#[cfg(feature = "roc-core")]
+impl DisplaysTwin {
+    fn word(&mut self, display: &str) -> u64 { self.names.word(display) }
 
     fn event(
         &mut self,
@@ -1004,8 +1029,7 @@ impl TwinnedDisplays {
     #[cfg(feature = "roc-core")]
     fn reseed(&mut self, view: rift_core::display_memory::DisplayMemory<u64, u64>) {
         let names = &self.twin.names;
-        // Every word the Roc core holds came from the table.
-        let name = |word: u64| names[word as usize].clone();
+        let name = |word: u64| names.name(word);
         self.rust = RiftDisplays::from_parts(
             view.displays().map(|(space, &display)| (SpaceId::new(space), name(display))),
             view.last_spaces().map(|(&display, space)| (name(display), SpaceId::new(space))),
@@ -1014,6 +1038,132 @@ impl TwinnedDisplays {
         tracing::warn!(
             reseeds,
             "roc-divergence: the display memory's Rust shadow was re-seeded from the Roc core"
+        );
+    }
+}
+
+/// Where a display departure moved windows from, as the engine holds it (engine slice E3b).
+pub(crate) type RiftEvictions =
+    rift_core::evictions::Evictions<WindowId, String, VirtualWorkspaceId>;
+
+/// An event of the evictions machine as the engine steps it.
+pub(crate) type RiftEvictionEvent =
+    rift_core::evictions::EvictionEvent<WindowId, pid_t, String, VirtualWorkspaceId>;
+
+/// Where a display departure moved windows from (engine slice E3b), with its Roc twin under
+/// `roc-core`. Flipped (policy (a)): under `roc-core` the Roc core holds the records and the
+/// Rust machine is its shadow, read through `Deref` (the queries) and re-seeded on any
+/// difference. A display crosses as its word in the twin's `DisplayNames`.
+#[derive(Default)]
+pub(crate) struct TwinnedEvictions {
+    rust: RiftEvictions,
+    #[cfg(feature = "roc-core")]
+    twin: EvictionsTwin,
+}
+
+#[cfg(feature = "roc-core")]
+#[derive(Default)]
+struct EvictionsTwin {
+    roc: rift_core_roc::RocEvictions,
+    names: DisplayNames,
+    steps: u64,
+}
+
+impl Deref for TwinnedEvictions {
+    type Target = RiftEvictions;
+
+    fn deref(&self) -> &Self::Target { &self.rust }
+}
+
+impl std::fmt::Debug for TwinnedEvictions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { self.rust.fmt(f) }
+}
+
+impl TwinnedEvictions {
+    /// As [`rift_core::evictions::Evictions::step`]: both must hold the same records when due.
+    pub(crate) fn step(&mut self, event: RiftEvictionEvent) {
+        #[cfg(feature = "roc-core")]
+        let plain = {
+            use rift_core::evictions::EvictionEvent as E;
+
+            use crate::roc_path::Word;
+            let names = &mut self.twin.names;
+            match &event {
+                E::Evicted {
+                    window,
+                    from,
+                    ordinal,
+                    landed,
+                    landed_on,
+                } => E::Evicted {
+                    window: window.word(),
+                    from: names.word(from),
+                    ordinal: *ordinal,
+                    landed: landed.word(),
+                    landed_on: landed_on.as_deref().map(|display| names.word(display)),
+                },
+                E::Forgotten(window) => E::Forgotten(window.word()),
+                E::Replaced { from, to } => E::Replaced {
+                    from: from.word(),
+                    to: to.word(),
+                },
+                E::AppQuit(pid) => E::AppQuit(*pid),
+            }
+        };
+        self.rust.step(event);
+        #[cfg(feature = "roc-core")]
+        {
+            use crate::roc_path::diverged;
+            self.twin.roc.step(plain);
+            self.twin.steps += 1;
+            if cfg!(test) || self.twin.steps.is_multiple_of(VIEW_EVERY) {
+                let rust = self.rust_view();
+                let view = self.twin.roc.view();
+                if rust != view {
+                    diverged("evictions", &plain, &rust, &view);
+                    self.reseed(view);
+                }
+            }
+        }
+    }
+
+    /// The Rust machine as words, as the Roc core views it.
+    #[cfg(feature = "roc-core")]
+    fn rust_view(&mut self) -> rift_core::evictions::Evictions<u64, u64, u64> {
+        use rift_core::evictions::Eviction;
+
+        use crate::roc_path::Word;
+        let records: Vec<_> = (self.rust.records())
+            .map(|(window, r)| (window.word(), r.display.clone(), r.ordinal, r.landed.word()))
+            .collect();
+        let names = &mut self.twin.names;
+        rift_core::evictions::Evictions::from_parts(records.into_iter().map(
+            |(window, display, ordinal, landed)| {
+                let display = names.word(&display);
+                (window, Eviction { display, ordinal, landed })
+            },
+        ))
+    }
+
+    /// Replace the Rust shadow with the Roc core's records, and count it.
+    #[cfg(feature = "roc-core")]
+    fn reseed(&mut self, view: rift_core::evictions::Evictions<u64, u64, u64>) {
+        use rift_core::evictions::Eviction;
+
+        use crate::roc_path::window_of_word;
+        let names = &self.twin.names;
+        self.rust = RiftEvictions::from_parts(view.records().filter_map(|(word, r)| {
+            let record = Eviction {
+                display: names.name(r.display),
+                ordinal: r.ordinal,
+                landed: workspace_of_word(r.landed),
+            };
+            Some((window_of_word(word)?, record))
+        }));
+        let reseeds = EVICTIONS_RESEEDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        tracing::warn!(
+            reseeds,
+            "roc-divergence: the evictions' Rust shadow was re-seeded from the Roc core"
         );
     }
 }
@@ -1308,6 +1458,36 @@ mod tests {
         );
         assert_eq!(displays.last_space("c"), Some(SpaceId::new(2)));
         assert!(super::DISPLAYS_RESEEDS.load(std::sync::atomic::Ordering::Relaxed) > before);
+    }
+
+    /// Re-seeding gives the evictions' Rust shadow exactly the Roc core's records, each display
+    /// and workspace back from its word, and is counted.
+    #[test]
+    fn an_evictions_reseed_makes_the_shadow_the_roc_cores_and_is_counted() {
+        use rift_core::evictions::EvictionEvent;
+        let mut evictions = super::TwinnedEvictions::default();
+        let window = WindowId::new(-4, 1);
+        let mut workspaces = slotmap::SlotMap::<super::VirtualWorkspaceId, ()>::with_key();
+        let landed = workspaces.insert(());
+        evictions.step(EvictionEvent::Evicted {
+            window,
+            from: "a".to_owned(),
+            ordinal: 2,
+            landed,
+            landed_on: Some("b".to_owned()),
+        });
+        // The shadow loses the record the Roc core still has.
+        evictions.rust.step(EvictionEvent::Forgotten(window));
+        assert_eq!(evictions.get(window), None, "the shadow lost it");
+        let before = super::EVICTIONS_RESEEDS.load(std::sync::atomic::Ordering::Relaxed);
+        let view = evictions.twin.roc.view();
+        evictions.reseed(view.clone());
+        assert_eq!(evictions.rust_view(), view);
+        assert_eq!(
+            evictions.ordinal(window, Some(landed), Some(&"a".to_owned())),
+            Some(2)
+        );
+        assert!(super::EVICTIONS_RESEEDS.load(std::sync::atomic::Ordering::Relaxed) > before);
     }
 
     /// An app quitting reaches the Roc core as the same app: its minimum goes in both.

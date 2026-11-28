@@ -854,6 +854,21 @@ Boundary := [].{
 	## A Space and a display: the Space's display, or the display's last Space.
 	SpaceDisplay := { space : U64, display : U64 }
 
+	# Where a display's departure moved windows from (`rift_core::evictions`), kept between
+	# events. Windows, displays and workspaces are one word each, pids an I32.
+
+	## A departure moved `window` off `from`, out of the workspace at `ordinal` there, into
+	## `landed`, on the display `landed_on` (none if that Space shows on no known display).
+	EvictionMove := { window : U64, from : U64, ordinal : U64, landed : U64, landed_on : MaybeWord }
+
+	EvictionPair := { from : U64, to : U64 }
+
+	## What the layout engine decides or observes that the evictions machine reads.
+	EvictionEvent := [Evicted(EvictionMove), Forgotten(U64), Replaced(EvictionPair), AppQuit(I32)]
+
+	## An evicted window's record.
+	EvictionRecord := { window : U64, display : U64, ordinal : U64, landed : U64 }
+
 	# The floating state (`rift_core::floats`), kept between events. Windows and workspaces are one
 	# word each, pids an I32 (macOS's pid_t).
 

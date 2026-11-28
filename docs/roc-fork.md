@@ -610,7 +610,11 @@ E3's state is three things with different shapes, so it goes in three steps, dat
 (`evicted`), **E3c** the native-layout memory (`native_layouts`, `native_reconcile_batch`). The
 snapshots E3c keeps are layout systems, whose own cores hold their state; the E3c machine
 decides which workspaces keep one, which windows each covers and when one is restored or
-dropped, and the snapshots stay host data keyed by its answers.
+dropped. **The lead's ruling (2026-11-28):** no host-side snapshot store. A snapshot is the
+core's own layout-state value, the type the core arrangement uses, held by the E3c machine:
+restore hands it back, drop deletes it, and the host keeps nothing. A layout system whose state
+is not core-owned yet is named before E3c, then brought into the core first or kept as a
+named, temporary exception.
 
 **E3a (2026-11-28): the display memory is a core machine.**
 `rift_core::display_memory::DisplayMemory<S, D>`, twinned (policy (a)) by
@@ -621,11 +625,15 @@ whether either map changed.
 - **Whether a display's last Space follows is a `LastSpace::{Follow, Hold}` the engine passes**,
   not a flag: `Hold` while that last Space is a saved Space not resolved yet, whose evidence it
   still is. Which saved Spaces are unresolved is persistence state, outside this slice.
+  **On E1's "stays" list, owned by the config slice:** `update_space_display` reads
+  `saved_space_is_unresolved` to choose `Hold`. It is a decision input the engine computes,
+  accepted for now (the lead, 2026-11-28); it moves when persistence becomes a core machine.
 - **A Space's display is a `D`, never an `Option<D>`.** The saved form keeps its
   `HashMap<SpaceId, Option<String>>` for compatibility; a `None` read from a file is a Space
   whose display is not known, so it is dropped at load (parsed once) and never written.
-- **Displays cross as words**: each display's place in the twin's table of display names,
-  which only grows. The seed steps the Roc core to a loaded memory (each last Space shown and
+- **Displays cross as words**: each display's place in the twin's table of display names
+  (`roc_twin::DisplayNames`), which only grows: bounded by the displays the process has ever
+  seen. The seed steps the Roc core to a loaded memory (each last Space shown and
   hidden again, then each Space shown with `Hold`) and is compared at once in tests.
 - `update_space_display` resyncs a Space's column widths when the memory changed or a workspace
   on the Space took the display as its home; it was an early return on "nothing to do".
@@ -643,7 +651,34 @@ whether either map changed.
   followed, a remap leaving last Spaces, a forgotten Space still a last Space, a self-remap
   moving.
 
-- Next: E3b (the evictions).
+**E3b (2026-11-28): the evictions are a core machine.**
+`rift_core::evictions::Evictions<W, D, Ws>`, twinned (policy (a)) by `roc_twin::TwinnedEvictions`
+over `roc/core/Evictions.roc`, holds, for each window a display departure moved, the display it
+left, its workspace's position there and the workspace it landed in; it was the engine's
+`evicted`. Events: `Evicted`, `Forgotten`, `Replaced`, `AppQuit`.
+- **The machine decides whether a departure is recorded**: `Evicted` carries the display the
+  window landed on (`Option<D>`: a Space can show on no known display), and a window that
+  stayed on its display leaves no record. The engine only gathers the facts (`note_eviction`).
+- **Whether a record still applies is a query of the machine**: `ordinal(window, assigned,
+  showing)` (still in its landing, and on the display it left), `stale(assigned)` (for a
+  reconcile batch) and `landed_in(workspace)`. The engine's `eviction_ordinal`,
+  `finish_native_reconcile` and `forget_native_layout_for_workspace` read them.
+- `remove_window_internal` forgot the record a second time; its only caller that drops the window
+  (`WindowRemoved`) has already forgotten it through `forget_native_layout_for_window_id`, so
+  that step is gone.
+- Displays cross as words through the same `DisplayNames` table type as E3a (each twin its own).
+- Tests for what nothing tested in the engine: a window moved to another display is recorded,
+  one that stayed is not, a return consumes the record; a record goes with its window, its app
+  or its workspace's transfer, and follows its window's new identity. Differential (80 000
+  steps) and copy tripwire in `rift-core-roc/tests/evictions.rs`.
+- Plants 13/13: a window that stayed recorded; a returned window keeps its record; a quit app's,
+  a rekeyed window's, a transferred workspace's and a removed window's records kept; in the
+  core, a record applying in any workspace, on any display, none stale, `landed_in` finding none;
+  in Roc, a window that stayed recorded, a replacement keeping the target's record, a quit
+  app's records kept.
+
+- Next: E3c (the native-layout memory), after naming any layout system whose state is not
+  core-owned.
 
 **Pruning (the lead, 2026-11-26):** at a milestone, delete only what no future build reuses:
 stale `target/roc-build` keys (all but the current sources', which the build script's line

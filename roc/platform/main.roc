@@ -5,7 +5,7 @@
 ## step.
 platform ""
 	requires {
-		[Model : model, Windows : windows, Mains : mains, Joined : joined, Trees : trees, Stacks : stacks, Traditionals : traditionals, Masters : masters, Floatings : floatings, Cols : cols, Sizes : sizes, Floats : floats, Remembered : remembered] for core : {
+		[Model : model, Windows : windows, Mains : mains, Joined : joined, Trees : trees, Stacks : stacks, Traditionals : traditionals, Masters : masters, Floatings : floatings, Cols : cols, Sizes : sizes, Floats : floats, Remembered : remembered, Evicted : evicted] for core : {
 			init : {} -> model,
 			step : model, Event -> { model : model, effects : List(Effect) },
 			bsp : BspShape -> List(Frame),
@@ -70,6 +70,9 @@ platform ""
 			display_memory_init : {} -> remembered,
 			display_memory_step : remembered, DisplayEvent -> { model : remembered, changed : Bool },
 			display_memory_view : remembered -> { model : remembered, displays : List(SpaceDisplay), last_spaces : List(SpaceDisplay) },
+			evictions_init : {} -> evicted,
+			evictions_step : evicted, EvictionEvent -> evicted,
+			evictions_view : evicted -> { model : evicted, records : List(EvictionRecord) },
 			narrow : F64 -> F32,
 			bsp_tree_init : BspInsertion -> trees,
 			bsp_tree_seed : BspTreeSeed -> trees,
@@ -132,6 +135,10 @@ platform ""
 		"roc_display_memory_step": display_memory_step_for_host,
 		"roc_display_memory_view": display_memory_view_for_host,
 		"roc_display_memory_release": display_memory_release_for_host,
+		"roc_evictions_init": evictions_init_for_host,
+		"roc_evictions_step": evictions_step_for_host,
+		"roc_evictions_view": evictions_view_for_host,
+		"roc_evictions_release": evictions_release_for_host,
 		"roc_narrow": narrow_for_host,
 		"roc_bsp_tree_init": bsp_tree_init_for_host,
 		"roc_bsp_tree_seed": bsp_tree_seed_for_host,
@@ -220,7 +227,7 @@ platform ""
 		},
 	}
 
-import Boundary exposing [AxisQuestion, TranslateQuestion, FloatingLayout, BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, Rect, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer, Admission, AdmitQuestion, CandidatesAnswer, CandidatesQuestion, DiscoveredAnswer, DiscoveredQuestion, DiscoveryAnswer, DiscoveryQuestion, AdmissionFacts, Change, InventoryQuestion, KeepsTransientQuestion, MisplacedQuestion, NativeTransientQuestion, NetQuestion, OutOfViewQuestion, PointerTargetQuestion, PresenceAnswer, PresenceQuestion, ReadAnswer, ReadQuestion, RetirementAnswer, RuleRefreshQuestion, RuleTargetsAnswer, RuleTargetsQuestion, SpaceAnswer, TitleChangeQuestion, VerdictAnswer, WindowAdmission, JoinedQuestion, JoinedView, PreviousQuestion, Reached, ResolveQuestion, StepQuestion, MaybeWord, Event, Effect, ReachedAnswer, EligibleQuestion, LifecycleEvent, PresentWindow, Invalidation, Revalidation, OwnershipEvent, Owned, WindowOwnership, WorkspaceSpace, SpaceActivation, JoinedEvent, Outcome, WorkspaceWindows, ModesQuestion, ModeVerdict, MainWindowEvent, NativeFocus, MainApp, SizesEvent, SizeRecord, AppMinimum, FloatsEvent, FloatFullscreenEntry, FloatFrameEntry, DisplayEvent, SpaceDisplay, EmitsQuestion, QuarantineQuestion, TargetQuestion, TargetAnswer, RaiseQuestion, RaiseAnswer, BspTreeSeed, BspInsertion, BspTreeEvent, BspTreeAnswer, BspLayoutSlot, BspNodeSlot, BspTreeNode, Aspect, BspFramesQuestion, StackSettings, StackTreeSeed, StackTreeEvent, StackTreeAnswer, StackLayoutSlot, StackFramesQuestion, TraditionalSettings, TraditionalSeed, TraditionalEvent, MasterSettings, MasterStackSeed, MasterStackEvent, GroupLayoutQuestion, GroupLayoutAnswer, FloatingSeed, FloatingEvent, FloatingAnswer, FloatingLayoutQuestion, FloatingLayoutAnswer, ColumnsSettings, ColumnsSeed, ColumnsEvent, ColumnsAnswer]
+import Boundary exposing [AxisQuestion, TranslateQuestion, FloatingLayout, BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, Rect, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer, Admission, AdmitQuestion, CandidatesAnswer, CandidatesQuestion, DiscoveredAnswer, DiscoveredQuestion, DiscoveryAnswer, DiscoveryQuestion, AdmissionFacts, Change, InventoryQuestion, KeepsTransientQuestion, MisplacedQuestion, NativeTransientQuestion, NetQuestion, OutOfViewQuestion, PointerTargetQuestion, PresenceAnswer, PresenceQuestion, ReadAnswer, ReadQuestion, RetirementAnswer, RuleRefreshQuestion, RuleTargetsAnswer, RuleTargetsQuestion, SpaceAnswer, TitleChangeQuestion, VerdictAnswer, WindowAdmission, JoinedQuestion, JoinedView, PreviousQuestion, Reached, ResolveQuestion, StepQuestion, MaybeWord, Event, Effect, ReachedAnswer, EligibleQuestion, LifecycleEvent, PresentWindow, Invalidation, Revalidation, OwnershipEvent, Owned, WindowOwnership, WorkspaceSpace, SpaceActivation, JoinedEvent, Outcome, WorkspaceWindows, ModesQuestion, ModeVerdict, MainWindowEvent, NativeFocus, MainApp, SizesEvent, SizeRecord, AppMinimum, FloatsEvent, FloatFullscreenEntry, FloatFrameEntry, DisplayEvent, SpaceDisplay, EvictionEvent, EvictionRecord, EmitsQuestion, QuarantineQuestion, TargetQuestion, TargetAnswer, RaiseQuestion, RaiseAnswer, BspTreeSeed, BspInsertion, BspTreeEvent, BspTreeAnswer, BspLayoutSlot, BspNodeSlot, BspTreeNode, Aspect, BspFramesQuestion, StackSettings, StackTreeSeed, StackTreeEvent, StackTreeAnswer, StackLayoutSlot, StackFramesQuestion, TraditionalSettings, TraditionalSeed, TraditionalEvent, MasterSettings, MasterStackSeed, MasterStackEvent, GroupLayoutQuestion, GroupLayoutAnswer, FloatingSeed, FloatingEvent, FloatingAnswer, FloatingLayoutQuestion, FloatingLayoutAnswer, ColumnsSettings, ColumnsSeed, ColumnsEvent, ColumnsAnswer]
 
 ## The entries' results: each machine's box and what its step answers. They name the
 ## platform's model variables, so they live here, not in `Boundary`.
@@ -269,6 +276,9 @@ DisplayMemoryStepped := { model : Box(Remembered), changed : Bool }
 
 ## The display memory, unchanged, and what it holds (each list in word order).
 DisplayMemoryViewed := { model : Box(Remembered), displays : List(SpaceDisplay), last_spaces : List(SpaceDisplay) }
+
+## The evictions machine, unchanged, and every record (in window order).
+EvictionsViewed := { model : Box(Evicted), records : List(EvictionRecord) }
 
 ## A BSP layout system's trees after an operation, and what it answered.
 BspTreeStepped := { model : Box(Trees), answer : BspTreeAnswer }
@@ -653,6 +663,26 @@ display_memory_view_for_host = |boxed| {
 ## The host cannot release a `Box(Remembered)`: only Roc knows its layout.
 display_memory_release_for_host : Box(Remembered) -> {}
 display_memory_release_for_host = |_| {}
+
+## Where a display's departure moved windows from (`rift_core::evictions::Evictions`), kept
+## between events: no records, at first.
+evictions_init_for_host : {} -> Box(Evicted)
+evictions_init_for_host = |{}| Box.box((core.evictions_init)({}))
+
+## An event: the machine after it.
+evictions_step_for_host : Box(Evicted), EvictionEvent -> Box(Evicted)
+evictions_step_for_host = |boxed, event| Box.box((core.evictions_step)(Box.unbox(boxed), event))
+
+## Every record, and the machine back unchanged.
+evictions_view_for_host : Box(Evicted) -> EvictionsViewed
+evictions_view_for_host = |boxed| {
+	viewed = (core.evictions_view)(Box.unbox(boxed))
+	{ model: Box.box(viewed.model), records: viewed.records }
+}
+
+## The host cannot release a `Box(Evicted)`: only Roc knows its layout.
+evictions_release_for_host : Box(Evicted) -> {}
+evictions_release_for_host = |_| {}
 
 ## The mode table's verdict on an initiative.
 mode_verdict_for_host : ModesQuestion -> ModeVerdict

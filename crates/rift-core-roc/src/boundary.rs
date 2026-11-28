@@ -8,6 +8,7 @@ use std::mem::ManuallyDrop;
 
 use rift_core::constraints::{Constraints, ConstraintsEvent, Observed};
 use rift_core::display_memory::{DisplayEvent, DisplayMemory, LastSpace};
+use rift_core::evictions::{Eviction, EvictionEvent, Evictions};
 use rift_core::floats::{Floats, FloatsEvent, FullscreenKind};
 use rift_core::focus::{
     self, Follow, MouseRaise, Removal, RemovalFocus, Stay, Unraised, UntrackedFocus,
@@ -3524,6 +3525,94 @@ impl Drop for DisplayMemoryBox {
     fn drop(&mut self) {
         // SAFETY: the box is this machine's and is never used again.
         unsafe { abi::roc_display_memory_release(self.0) }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The evictions.
+
+/// The evictions machine as words: windows, displays and workspaces; pids as i32.
+pub(crate) type WordEvictions = Evictions<u64, u64, u64>;
+
+fn eviction_event(event: EvictionEvent<u64, i32, u64, u64>) -> abi::BoundaryEvictionEvent {
+    use abi::BoundaryEvictionEventTag as Tag;
+    match event {
+        EvictionEvent::Evicted {
+            window,
+            from,
+            ordinal,
+            landed,
+            landed_on,
+        } => union!(
+            BoundaryEvictionEvent,
+            BoundaryEvictionEventPayload.evicted(abi::BoundaryEvictionMove {
+                window,
+                from,
+                ordinal,
+                landed,
+                landed_on: maybe_word(landed_on),
+            }),
+            Tag::Evicted
+        ),
+        EvictionEvent::Forgotten(window) => union!(
+            BoundaryEvictionEvent,
+            BoundaryEvictionEventPayload.forgotten(window),
+            Tag::Forgotten
+        ),
+        EvictionEvent::Replaced { from, to } => union!(
+            BoundaryEvictionEvent,
+            BoundaryEvictionEventPayload.replaced(abi::BoundaryEvictionPair { from, to }),
+            Tag::Replaced
+        ),
+        EvictionEvent::AppQuit(pid) => union!(
+            BoundaryEvictionEvent,
+            BoundaryEvictionEventPayload.app_quit(pid),
+            Tag::AppQuit
+        ),
+    }
+}
+
+/// The evictions machine's box, which only Roc can read or free; only the `roc_evictions_*`
+/// entries make and take one. Dropping it releases the machine.
+pub(crate) struct EvictionsBox(abi::RocBox);
+
+impl EvictionsBox {
+    pub(crate) fn empty() -> EvictionsBox { EvictionsBox(unsafe { abi::roc_evictions_init() }) }
+
+    /// The raw box, handed to Roc (see [`LifecycleBox::into_raw`]).
+    fn into_raw(self) -> abi::RocBox {
+        let raw = self.0;
+        std::mem::forget(self);
+        raw
+    }
+
+    /// An event: the machine after it.
+    pub(crate) fn step(self, event: EvictionEvent<u64, i32, u64, u64>) -> (EvictionsBox, ()) {
+        // SAFETY: the box is this machine's, given to the step; its successor comes back.
+        let stepped = unsafe { abi::roc_evictions_step(self.into_raw(), eviction_event(event)) };
+        (EvictionsBox(stepped), ())
+    }
+
+    /// Every record.
+    pub(crate) fn view(self, host: &abi::RocHost) -> (EvictionsBox, WordEvictions) {
+        // SAFETY: as in `step`; the list is Roc's answer, owned here, read in full, released.
+        let viewed = unsafe { abi::roc_evictions_view(self.into_raw()) };
+        let view = Evictions::from_parts(viewed.records.as_slice().iter().map(|r| {
+            (r.window, Eviction {
+                display: r.display,
+                ordinal: r.ordinal,
+                landed: r.landed,
+            })
+        }));
+        unsafe { viewed.records.decref(host) };
+        (EvictionsBox(viewed.model), view)
+    }
+}
+
+impl Drop for EvictionsBox {
+    fn drop(&mut self) {
+        // SAFETY: the box is this machine's and is never used again.
+        unsafe { abi::roc_evictions_release(self.0) }
     }
 }
 
