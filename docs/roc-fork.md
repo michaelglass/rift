@@ -1184,6 +1184,22 @@ conversion, one differential. Every fact is in the question, so none is asked la
   before the best aligned, a touching display counted as behind; in the engine, a Roc window
   answer read back as another window.
 
+**E1a-3 (2026-11-28): each focus question answers in its own kind** (the lead's review of
+E1a-2: one question type with one shared answer type made a mismatched pair representable, and
+engine call sites matched away answers that cannot occur). `rift_core::focus::FocusAsk` has an
+associated `Answer`; each kind implements it (`WorkspaceFocus`, `RecordAsk`, `CycleAsk`,
+`EdgeAsk`, `EntryAsk`, `FallbackAsk`, `SpaceAsk`), so the engine sees `Option<W>`,
+`FocusRecord`, `PastTheEdge` or `Option<S>` and never a `FocusChoice`. `FocusQuestion` and
+`FocusChoice` remain the wire form behind the one Roc entry; the pairing is checked once, in
+`FocusAsk::of`, which reads only a choice of its own kind: an answer of another kind from Roc is a
+difference like any other (reported; the Rust answer stands). The engine's door is one generic
+`LayoutEngine::focus`.
+- Tests: every kind reads only its own kind of choice (rift-core); every kind through the engine's
+  door, Roc answering under `roc-core`.
+- Plants 5/5: an Edge question answered with a Space from Roc (caught by the differential, and by
+  the engine), a Cycle question answered with a record from Roc (engine), an Edge ask reading a
+  window choice, a window ask reading a Space choice.
+
 - Next: E1b (workspace switching).
 
 **Pruning (the lead, 2026-11-26):** at a milestone, delete only what no future build reuses:

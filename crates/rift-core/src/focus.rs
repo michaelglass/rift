@@ -1011,9 +1011,235 @@ impl<W: Copy, S: Copy> FocusChoice<W, S> {
     }
 }
 
+/// One kind of focus question with its own answer: callers see `Answer`, never a
+/// [`FocusChoice`]. The wire form ([`FocusQuestion`], [`FocusChoice`]) is a boundary's, and `of`
+/// is where a choice of another kind is caught (none: a twin's bug, reported as a difference).
+pub trait FocusAsk<W, S> {
+    type Answer: Copy + PartialEq + std::fmt::Debug;
+    /// The Rust core's answer.
+    fn answer(&self) -> Self::Answer;
+    /// The question in its wire form.
+    fn question(self) -> FocusQuestion<W, S>;
+    /// An answer in its wire form.
+    fn choice(answer: Self::Answer) -> FocusChoice<W, S>;
+    /// A wire answer as this kind's answer; none for a choice of another kind.
+    fn of(choice: FocusChoice<W, S>) -> Option<Self::Answer>;
+}
+
+/// [`focus_record`]'s facts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RecordAsk<W> {
+    pub workspace: bool,
+    pub focus: Option<Committed<W>>,
+}
+
+/// [`floating_cycle`]'s facts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CycleAsk<W> {
+    pub floating: Vec<W>,
+    pub focused: Option<W>,
+    pub direction: Direction,
+}
+
+/// [`past_the_edge`]'s facts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EdgeAsk {
+    pub direction: Direction,
+    pub scrolling: bool,
+}
+
+/// [`entry_window`]'s facts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntryAsk<W> {
+    pub directional: Option<W>,
+    pub visible: Vec<W>,
+}
+
+/// [`focus_fallback`]'s facts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FallbackAsk<W> {
+    pub first_floating: Option<W>,
+    pub previous: Option<W>,
+    pub first_visible: Option<W>,
+}
+
+/// [`space_in_direction`]'s facts.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpaceAsk<S> {
+    pub current: Rect,
+    pub direction: Direction,
+    pub candidates: Vec<(S, Rect)>,
+}
+
+/// The wire answer of a window question.
+fn window_of<W, S>(choice: FocusChoice<W, S>) -> Option<Option<W>> {
+    match choice {
+        FocusChoice::Window(window) => Some(window),
+        FocusChoice::Record(_) | FocusChoice::Edge(_) | FocusChoice::Space(_) => None,
+    }
+}
+
+impl<W: Copy + PartialEq + std::fmt::Debug + 'static, S> FocusAsk<W, S> for WorkspaceFocus<W> {
+    type Answer = Option<W>;
+
+    fn answer(&self) -> Option<W> { workspace_focus(self) }
+
+    fn question(self) -> FocusQuestion<W, S> { FocusQuestion::Workspace(self) }
+
+    fn choice(answer: Option<W>) -> FocusChoice<W, S> { FocusChoice::Window(answer) }
+
+    fn of(choice: FocusChoice<W, S>) -> Option<Option<W>> { window_of(choice) }
+}
+
+impl<W: Copy + PartialEq + std::fmt::Debug + 'static, S> FocusAsk<W, S> for RecordAsk<W> {
+    type Answer = FocusRecord<W>;
+
+    fn answer(&self) -> FocusRecord<W> { focus_record(self.workspace, self.focus) }
+
+    fn question(self) -> FocusQuestion<W, S> {
+        FocusQuestion::Record {
+            workspace: self.workspace,
+            focus: self.focus,
+        }
+    }
+
+    fn choice(answer: FocusRecord<W>) -> FocusChoice<W, S> { FocusChoice::Record(answer) }
+
+    fn of(choice: FocusChoice<W, S>) -> Option<FocusRecord<W>> {
+        match choice {
+            FocusChoice::Record(record) => Some(record),
+            FocusChoice::Window(_) | FocusChoice::Edge(_) | FocusChoice::Space(_) => None,
+        }
+    }
+}
+
+impl<W: Copy + PartialEq + std::fmt::Debug + 'static, S> FocusAsk<W, S> for CycleAsk<W> {
+    type Answer = Option<W>;
+
+    fn answer(&self) -> Option<W> { floating_cycle(&self.floating, self.focused, self.direction) }
+
+    fn question(self) -> FocusQuestion<W, S> {
+        FocusQuestion::Cycle {
+            floating: self.floating,
+            focused: self.focused,
+            direction: self.direction,
+        }
+    }
+
+    fn choice(answer: Option<W>) -> FocusChoice<W, S> { FocusChoice::Window(answer) }
+
+    fn of(choice: FocusChoice<W, S>) -> Option<Option<W>> { window_of(choice) }
+}
+
+impl<W, S> FocusAsk<W, S> for EdgeAsk {
+    type Answer = PastTheEdge;
+
+    fn answer(&self) -> PastTheEdge { past_the_edge(self.direction, self.scrolling) }
+
+    fn question(self) -> FocusQuestion<W, S> {
+        FocusQuestion::Edge {
+            direction: self.direction,
+            scrolling: self.scrolling,
+        }
+    }
+
+    fn choice(answer: PastTheEdge) -> FocusChoice<W, S> { FocusChoice::Edge(answer) }
+
+    fn of(choice: FocusChoice<W, S>) -> Option<PastTheEdge> {
+        match choice {
+            FocusChoice::Edge(edge) => Some(edge),
+            FocusChoice::Window(_) | FocusChoice::Record(_) | FocusChoice::Space(_) => None,
+        }
+    }
+}
+
+impl<W: Copy + PartialEq + std::fmt::Debug + 'static, S> FocusAsk<W, S> for EntryAsk<W> {
+    type Answer = Option<W>;
+
+    fn answer(&self) -> Option<W> { entry_window(self.directional, &self.visible) }
+
+    fn question(self) -> FocusQuestion<W, S> {
+        FocusQuestion::Entry {
+            directional: self.directional,
+            visible: self.visible,
+        }
+    }
+
+    fn choice(answer: Option<W>) -> FocusChoice<W, S> { FocusChoice::Window(answer) }
+
+    fn of(choice: FocusChoice<W, S>) -> Option<Option<W>> { window_of(choice) }
+}
+
+impl<W: Copy + PartialEq + std::fmt::Debug + 'static, S> FocusAsk<W, S> for FallbackAsk<W> {
+    type Answer = Option<W>;
+
+    fn answer(&self) -> Option<W> {
+        focus_fallback(self.first_floating, self.previous, self.first_visible)
+    }
+
+    fn question(self) -> FocusQuestion<W, S> {
+        FocusQuestion::Fallback {
+            first_floating: self.first_floating,
+            previous: self.previous,
+            first_visible: self.first_visible,
+        }
+    }
+
+    fn choice(answer: Option<W>) -> FocusChoice<W, S> { FocusChoice::Window(answer) }
+
+    fn of(choice: FocusChoice<W, S>) -> Option<Option<W>> { window_of(choice) }
+}
+
+impl<W, S: Copy + PartialEq + std::fmt::Debug + 'static> FocusAsk<W, S> for SpaceAsk<S> {
+    type Answer = Option<S>;
+
+    fn answer(&self) -> Option<S> {
+        space_in_direction(self.current, self.direction, &self.candidates)
+    }
+
+    fn question(self) -> FocusQuestion<W, S> {
+        FocusQuestion::SpaceInDirection {
+            current: self.current,
+            direction: self.direction,
+            candidates: self.candidates,
+        }
+    }
+
+    fn choice(answer: Option<S>) -> FocusChoice<W, S> { FocusChoice::Space(answer) }
+
+    fn of(choice: FocusChoice<W, S>) -> Option<Option<S>> {
+        match choice {
+            FocusChoice::Space(space) => Some(space),
+            FocusChoice::Window(_) | FocusChoice::Record(_) | FocusChoice::Edge(_) => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     // The layout engine's focus choices.
+
+    /// Every kind reads only a choice of its own kind: any other is none (a twin's bug).
+    #[test]
+    fn a_focus_choice_of_another_kind_reads_as_nothing() {
+        type C = FocusChoice<u32, u32>;
+        let window = C::Window(Some(1));
+        let record = C::Record(FocusRecord::Tiled(1));
+        let edge = C::Edge(PastTheEdge::Stop);
+        let space = C::Space(Some(1));
+        let all = [window, record, edge, space];
+        fn reads<A: FocusAsk<u32, u32>>(choices: &[C]) -> Vec<bool> {
+            choices.iter().map(|&c| A::of(c).is_some()).collect()
+        }
+        let only = |i: usize| (0..4).map(|j| j == i).collect::<Vec<_>>();
+        assert_eq!(reads::<WorkspaceFocus<u32>>(&all), only(0));
+        assert_eq!(reads::<CycleAsk<u32>>(&all), only(0));
+        assert_eq!(reads::<EntryAsk<u32>>(&all), only(0));
+        assert_eq!(reads::<FallbackAsk<u32>>(&all), only(0));
+        assert_eq!(reads::<RecordAsk<u32>>(&all), only(1));
+        assert_eq!(reads::<EdgeAsk>(&all), only(2));
+        assert_eq!(reads::<SpaceAsk<u32>>(&all), only(3));
+    }
 
     fn eligible(window: u32, belongs: bool) -> Option<Eligible<u32>> {
         Some(Eligible { window, belongs })

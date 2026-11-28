@@ -4,7 +4,8 @@ use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use rift_core::display_memory::{DisplayEvent, LastSpace};
 use rift_core::evictions::EvictionEvent;
 use rift_core::focus::{
-    Committed, Eligible, FocusChoice, FocusQuestion, FocusRecord, PastTheEdge, WorkspaceFocus,
+    Committed, CycleAsk, EdgeAsk, Eligible, EntryAsk, FallbackAsk, FocusAsk, FocusRecord,
+    PastTheEdge, RecordAsk, SpaceAsk, WorkspaceFocus,
 };
 use rift_core::native_memory::{Candidate, Current, Held as _, MemoryAnswer, MemoryEvent};
 use rift_protocol::{FloatingWindowSize, FloatingWindowSizePreset, ToggleWindowFloatingOptions};
@@ -980,17 +981,15 @@ impl LayoutEngine {
             && self.is_active_workspace_window(window_store, space, window)
     }
 
-    /// One of the engine's focus choices: the Rust core's answer, and under `roc-core` the Roc
-    /// core's, which decides (a difference is reported).
-    fn focus_choice(
-        &self,
-        question: FocusQuestion<WindowId, SpaceId>,
-    ) -> FocusChoice<WindowId, SpaceId> {
-        let rust = rift_core::focus::choose(&question);
+    /// One of the engine's focus choices, answered in its own kind: the Rust core's answer, and
+    /// under `roc-core` the Roc core's, which decides. A Roc answer of another kind is a
+    /// difference like any other (reported; the Rust answer stands).
+    fn focus<A: FocusAsk<WindowId, SpaceId>>(ask: A) -> A::Answer {
+        let rust = ask.answer();
         #[cfg(feature = "roc-core")]
         let rust = {
             use crate::roc_path::Word;
-            let words = question.map(Word::word, Word::word);
+            let words = ask.question().map(Word::word, Word::word);
             let roc = rift_core_roc::focus::engine_focus(words.clone());
             crate::roc_path::decided(
                 &crate::roc_path::FOCUS,
@@ -998,28 +997,17 @@ impl LayoutEngine {
                 &[],
                 &words,
                 rust,
-                &rust.map(|w| Some(w.word()), |s| Some(s.word())).expect("words for every id"),
+                &A::choice(rust)
+                    .map(|w| Some(w.word()), |s| Some(s.word()))
+                    .expect("words for every id"),
                 Ok(roc),
-                |roc| roc.map(crate::roc_path::window_of_word, |s| Some(SpaceId::new(s))),
+                |roc| {
+                    (roc.map(crate::roc_path::window_of_word, |s| Some(SpaceId::new(s))))
+                        .and_then(A::of)
+                },
             )
         };
         rust
-    }
-
-    /// A focus choice that answers a window.
-    fn chosen_window(&self, question: FocusQuestion<WindowId, SpaceId>) -> Option<WindowId> {
-        match self.focus_choice(question) {
-            FocusChoice::Window(window) => window,
-            other => unreachable!("a window question answers a window: {other:?}"),
-        }
-    }
-
-    /// A focus choice that answers where a focus is recorded.
-    fn chosen_record(&self, question: FocusQuestion<WindowId, SpaceId>) -> FocusRecord<WindowId> {
-        match self.focus_choice(question) {
-            FocusChoice::Record(record) => record,
-            other => unreachable!("a record question answers a record: {other:?}"),
-        }
     }
 
     fn preferred_focus_for_workspace(
@@ -1051,7 +1039,7 @@ impl LayoutEngine {
             floating: self.active_floating_windows_in_workspace(window_store, space),
             floating_last_focus: self.floats.last_focus(),
         };
-        self.chosen_window(FocusQuestion::Workspace(facts))
+        Self::focus(facts)
     }
 
     pub(crate) fn commit_workspace_focus(
@@ -1068,7 +1056,7 @@ impl LayoutEngine {
                 && !window_store.is_temporarily_unavailable(window),
             floating: self.floats.is_floating(window),
         });
-        let record = self.chosen_record(FocusQuestion::Record {
+        let record = Self::focus(RecordAsk {
             workspace: workspace.is_some(),
             focus,
         });
@@ -1267,7 +1255,7 @@ impl LayoutEngine {
             belongs: true,
             floating: self.floats.is_floating(window),
         };
-        match self.chosen_record(FocusQuestion::Record {
+        match Self::focus(RecordAsk {
             workspace: true,
             focus: Some(committed),
         }) {
@@ -1335,7 +1323,7 @@ impl LayoutEngine {
 
         if is_floating {
             let windows = self.active_floating_windows_in_workspace(window_store.read(), space);
-            let cycled = self.chosen_window(FocusQuestion::Cycle {
+            let cycled = Self::focus(CycleAsk {
                 floating: windows,
                 focused: self.floats.focused(),
                 direction: super::systems::core_direction(direction),
@@ -1367,11 +1355,11 @@ impl LayoutEngine {
             self.workspaces[ws_id].layout_system,
             LayoutSystemKind::Scrolling(_)
         );
-        let edge = FocusQuestion::Edge {
+        let edge = EdgeAsk {
             direction: super::systems::core_direction(direction),
             scrolling,
         };
-        if self.focus_choice(edge) == FocusChoice::Edge(PastTheEdge::Stop) {
+        if Self::focus(edge) == PastTheEdge::Stop {
             return EventResponse::default();
         }
 
@@ -1391,17 +1379,17 @@ impl LayoutEngine {
                 self.workspaces[ws].layout_system.window_in_direction(layout, direction);
             let directional =
                 self.filter_active_workspace_window(window_store.read(), destination, directional);
-            let entry = FocusQuestion::Entry {
+            let entry = EntryAsk {
                 directional,
                 visible: raise.clone(),
             };
-            if let Some(window) = self.chosen_window(entry) {
+            if let Some(window) = Self::focus(entry) {
                 self.workspaces[ws].layout_system.focus(layout, Focus::Select(window));
                 return commit(self, window_store, target, window, raise);
             }
         }
 
-        let fallback = self.chosen_window(FocusQuestion::Fallback {
+        let fallback = Self::focus(FallbackAsk {
             first_floating: self
                 .active_floating_windows_in_workspace(window_store.read(), space)
                 .first()
@@ -1428,15 +1416,11 @@ impl LayoutEngine {
             .filter(|&&space| space != current_space)
             .filter_map(|&space| Some((space, core_rect(*space_frames.get(&space)?))))
             .collect();
-        let question = FocusQuestion::SpaceInDirection {
+        Self::focus(SpaceAsk {
             current,
             direction: super::systems::core_direction(direction),
             candidates,
-        };
-        match self.focus_choice(question) {
-            FocusChoice::Space(space) => space,
-            other => unreachable!("a Space question answers a Space: {other:?}"),
-        }
+        })
     }
 
     // Explicit placement edits revoke recovery even when logical membership is unchanged.
@@ -5199,6 +5183,77 @@ mod tests {
         assert_ne!(focused, Some(a));
         assert!(focused == Some(b) || focused == Some(c), "{focused:?}");
         let _ = response;
+    }
+
+    /// Every kind of focus question through the engine's one door, each answer in its own
+    /// kind; under `roc-core` the Roc core answers too (a difference, or an answer of another
+    /// kind, fails here).
+    #[test]
+    fn each_focus_question_answers_in_its_own_kind() {
+        use rift_core::focus::{CycleAsk, EdgeAsk, EntryAsk, FallbackAsk, RecordAsk, SpaceAsk};
+        use rift_core::layout::bsp_tree::Direction;
+        use rift_core::plain::Rect;
+        let w = |n| WindowId::new(1, n);
+        let rect = |x| Rect { x, y: 0.0, w: 100.0, h: 100.0 };
+        for direction in [
+            Direction::Left,
+            Direction::Right,
+            Direction::Up,
+            Direction::Down,
+        ] {
+            for scrolling in [false, true] {
+                let horizontal = matches!(direction, Direction::Left | Direction::Right);
+                let expected = if scrolling && horizontal {
+                    PastTheEdge::Stop
+                } else {
+                    PastTheEdge::NextSpace
+                };
+                assert_eq!(LayoutEngine::focus(EdgeAsk { direction, scrolling }), expected);
+            }
+        }
+        let cycle = CycleAsk {
+            floating: vec![w(1), w(2), w(3)],
+            focused: Some(w(1)),
+            direction: Direction::Left,
+        };
+        assert_eq!(LayoutEngine::focus(cycle), Some(w(3)));
+        let entry = EntryAsk {
+            directional: None,
+            visible: vec![w(2), w(3)],
+        };
+        assert_eq!(LayoutEngine::focus(entry), Some(w(2)));
+        let fallback = FallbackAsk {
+            first_floating: None,
+            previous: Some(w(4)),
+            first_visible: Some(w(5)),
+        };
+        assert_eq!(LayoutEngine::focus(fallback), Some(w(4)));
+        let committed = Committed {
+            window: w(1),
+            belongs: true,
+            floating: true,
+        };
+        let record = RecordAsk {
+            workspace: true,
+            focus: Some(committed),
+        };
+        assert_eq!(LayoutEngine::focus(record), FocusRecord::Floating(w(1)));
+        let space = SpaceId::new(7);
+        let ask = SpaceAsk {
+            current: rect(0.0),
+            direction: Direction::Right,
+            candidates: vec![(space, rect(100.0))],
+        };
+        assert_eq!(LayoutEngine::focus(ask), Some(space));
+        let workspace = WorkspaceFocus {
+            preferred: Some(Eligible { window: w(6), belongs: false }),
+            last_focused: Some(Eligible { window: w(7), belongs: true }),
+            selected: None,
+            visible: vec![],
+            floating: vec![],
+            floating_last_focus: None,
+        };
+        assert_eq!(LayoutEngine::focus(workspace), Some(w(7)));
     }
 
     /// A focus committed to a window of another workspace is not kept: the focus is cleared.
