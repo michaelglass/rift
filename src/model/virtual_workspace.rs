@@ -175,13 +175,8 @@ fn balance_owners(displays: usize, pins: &[Option<usize>], mut owners: Vec<usize
     owners
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum WorkspaceTransferReason {
-    Explicit,
-    DisplayArrival,
-    DisplayDeparture,
-    Restoration,
-}
+/// Why a workspace moves to another Space: the core's reason.
+pub(crate) type WorkspaceTransferReason = rift_core::workspaces::TransferReason;
 
 impl std::fmt::Display for VirtualWorkspaceId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

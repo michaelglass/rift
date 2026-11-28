@@ -1200,7 +1200,26 @@ difference like any other (reported; the Rust answer stands). The engine's door 
   the engine), a Cycle question answered with a record from Roc (engine), an Edge ask reading a
   window choice, a window ask reading a Space choice.
 
-- Next: E1b (workspace switching).
+**E1b-1 (2026-11-28): the engine's workspace switching choices are core functions**, in
+`rift_core::workspaces`:
+- `switch` (`Switch::{Stay, Back, Navigate}`): switching to the workspace the acting Space shows
+  goes back with back-and-forth and stays without it; any other navigates.
+- `arrival` (`Arrival::{Focus(S), Activate}`): a workspace its Space showed already, asked from
+  another Space, only takes focus there; any other is shown anew.
+- `source_after` (`SourceAfter::{Relaid, Untouched}`) over `TransferReason`, now the core's (the
+  model's `WorkspaceTransferReason` is an alias of it): only an explicit move lays out and
+  re-homes the Space it leaves. `moved` (`Moved::{Across, InPlace}`): only a transfer across
+  Spaces reports its windows as transferred.
+- Tests for what nothing tested: an explicit move of a Space's last workspace leaves it a new one,
+  laid out and homed on its display, and a display departure leaves it empty; a workspace shown on
+  another Space only takes focus, a hidden one is shown.
+- Plants 10/10 (five on the core's choices, five on the engine's facts; three engine plants
+  survived until those tests existed).
+- **Asked of the lead, not changed:** `ensure_active_workspace_info` shows a Space's first
+  workspace right after initialising it, which overrides `default_workspace` when it is the one
+  initialising (a probe: `default_workspace = 2` shows the first). Its classing waits on that.
+
+- Next: E1b-2 (the switching choices in Roc).
 
 **Pruning (the lead, 2026-11-26):** at a milestone, delete only what no future build reuses:
 stale `target/roc-build` keys (all but the current sources', which the build script's line

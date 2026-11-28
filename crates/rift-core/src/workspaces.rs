@@ -127,6 +127,99 @@ pub fn previous<K: Copy, S: Copy + PartialEq>(
     eligible(mode, context, on).then_some((id, on))
 }
 
+/// What switching to a workspace does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Switch {
+    /// It is shown on the acting Space already, and back-and-forth is off.
+    Stay,
+    /// It is shown on the acting Space already: back-and-forth goes to the previous one.
+    Back,
+    /// It goes to the workspace.
+    Navigate,
+}
+
+/// What switching to `target` from a Space showing `shown_here` does.
+pub fn switch<K: PartialEq>(shown_here: Option<K>, target: K, back_and_forth: bool) -> Switch {
+    match (shown_here == Some(target), back_and_forth) {
+        (false, _) => Switch::Navigate,
+        (true, true) => Switch::Back,
+        (true, false) => Switch::Stay,
+    }
+}
+
+/// How a workspace navigated to arrives, once the catalog shows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Arrival<S> {
+    /// It was shown on its own Space already, asked from another: that Space takes focus, and
+    /// nothing is shown anew.
+    Focus(S),
+    /// It is shown anew on its Space (laid out, its windows raised).
+    Activate,
+}
+
+/// How `target`, on `its_space` (which showed `shown_there` before), arrives when asked from
+/// `asked_from`.
+pub fn arrival<K: PartialEq, S: Copy + PartialEq>(
+    shown_there: Option<K>,
+    target: K,
+    asked_from: S,
+    its_space: S,
+) -> Arrival<S> {
+    if shown_there == Some(target) && asked_from != its_space {
+        Arrival::Focus(its_space)
+    } else {
+        Arrival::Activate
+    }
+}
+
+/// Why a workspace moves to another Space.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransferReason {
+    /// A command moved it.
+    Explicit,
+    /// Its home display arrived.
+    DisplayArrival,
+    /// Its display departed.
+    DisplayDeparture,
+    /// A restored layout put it back.
+    Restoration,
+}
+
+/// What a transfer does to the Space it leaves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceAfter {
+    /// An explicit move: the source is laid out again at its size and its display is re-homed.
+    Relaid,
+    /// A display change or a restoration: the source is left as the display machinery leaves it.
+    Untouched,
+}
+
+/// What a transfer for `reason` does to its source Space.
+pub fn source_after(reason: TransferReason) -> SourceAfter {
+    match reason {
+        TransferReason::Explicit => SourceAfter::Relaid,
+        TransferReason::DisplayArrival
+        | TransferReason::DisplayDeparture
+        | TransferReason::Restoration => SourceAfter::Untouched,
+    }
+}
+
+/// Whether a transfer's windows changed Space (reported as transferred) or stayed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Moved {
+    Across,
+    InPlace,
+}
+
+/// Whether a transfer from `source` to `target` moves its windows across Spaces.
+pub fn moved<S: PartialEq>(source: S, target: S) -> Moved {
+    if source == target {
+        Moved::InPlace
+    } else {
+        Moved::Across
+    }
+}
+
 /// Whether window discovery emits a window it found on a Space: unless the window is assigned
 /// to a workspace and the Space's active workspace (asked only then) is another one. A window
 /// with no assignment, or a Space with no active workspace, is emitted.
@@ -716,6 +809,37 @@ pub mod plain {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn switching_to_the_shown_workspace_goes_back_only_with_back_and_forth() {
+        assert_eq!(switch(Some(1), 1, true), Switch::Back);
+        assert_eq!(switch(Some(1), 1, false), Switch::Stay);
+        assert_eq!(switch(Some(2), 1, false), Switch::Navigate);
+        assert_eq!(switch(Some(2), 1, true), Switch::Navigate);
+        assert_eq!(switch(None, 1, true), Switch::Navigate);
+    }
+
+    #[test]
+    fn a_workspace_shown_elsewhere_arrives_as_focus_on_its_space() {
+        assert_eq!(arrival(Some(1), 1, 10, 20), Arrival::Focus(20));
+        assert_eq!(arrival(Some(1), 1, 20, 20), Arrival::Activate);
+        assert_eq!(arrival(Some(2), 1, 10, 20), Arrival::Activate);
+        assert_eq!(arrival(None, 1, 10, 20), Arrival::Activate);
+    }
+
+    #[test]
+    fn only_an_explicit_transfer_relays_its_source() {
+        assert_eq!(source_after(TransferReason::Explicit), SourceAfter::Relaid);
+        for reason in [
+            TransferReason::DisplayArrival,
+            TransferReason::DisplayDeparture,
+            TransferReason::Restoration,
+        ] {
+            assert_eq!(source_after(reason), SourceAfter::Untouched);
+        }
+        assert_eq!(moved(1, 2), Moved::Across);
+        assert_eq!(moved(1, 1), Moved::InPlace);
+    }
+
     use WorkspaceMode::{Global, PerDisplay};
 
     use super::*;

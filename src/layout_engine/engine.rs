@@ -8,6 +8,7 @@ use rift_core::focus::{
     PastTheEdge, RecordAsk, SpaceAsk, WorkspaceFocus,
 };
 use rift_core::native_memory::{Candidate, Current, Held as _, MemoryAnswer, MemoryEvent};
+use rift_core::workspaces::{Arrival, Moved, SourceAfter, Switch};
 use rift_protocol::{FloatingWindowSize, FloatingWindowSizePreset, ToggleWindowFloatingOptions};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
@@ -1135,15 +1136,16 @@ impl LayoutEngine {
         preferred_focus_window: Option<WindowId>,
     ) -> EventResponse {
         let command_space = context.space;
-        if self.workspaces.reading(window_store.read()).active_workspace(command_space) == Some(id)
-        {
-            return if self.workspaces.settings.workspace_auto_back_and_forth {
-                self.switch_to_previous_workspace(window_store, context)
-            } else {
-                EventResponse::default()
-            };
+        let shown_here =
+            self.workspaces.reading(window_store.read()).active_workspace(command_space);
+        let back_and_forth = self.workspaces.settings.workspace_auto_back_and_forth;
+        match rift_core::workspaces::switch(shown_here, id, back_and_forth) {
+            Switch::Stay => EventResponse::default(),
+            Switch::Back => self.switch_to_previous_workspace(window_store, context),
+            Switch::Navigate => {
+                self.navigate_to_workspace(window_store, command_space, id, preferred_focus_window)
+            }
         }
-        self.navigate_to_workspace(window_store, command_space, id, preferred_focus_window)
     }
 
     fn switch_to_previous_workspace(
@@ -1170,13 +1172,12 @@ impl LayoutEngine {
             .reading(window_store.read())
             .workspace_space(id)
             .expect("a listed workspace has a Space");
-        let was_active =
-            self.workspaces.reading(window_store.read()).active_workspace(space) == Some(id);
+        let shown_there = self.workspaces.reading(window_store.read()).active_workspace(space);
         if !self.workspaces.set_active_workspace_from(window_store, command_space, id) {
             return EventResponse::default();
         }
-        if was_active && command_space != space {
-            return EventResponse {
+        match rift_core::workspaces::arrival(shown_there, id, command_space, space) {
+            Arrival::Focus(space) => EventResponse {
                 workspace_space: Some(space),
                 focus_window: self.preferred_focus_for_workspace(
                     window_store.read(),
@@ -1185,9 +1186,11 @@ impl LayoutEngine {
                     preferred_focus_window,
                 ),
                 ..EventResponse::default()
-            };
+            },
+            Arrival::Activate => {
+                self.activate_workspace(window_store, space, id, preferred_focus_window)
+            }
         }
-        self.activate_workspace(window_store, space, id, preferred_focus_window)
     }
 
     fn filter_active_workspace_windows(
@@ -3856,14 +3859,15 @@ impl LayoutEngine {
             return EventResponse::default();
         }
         self.native.step(MemoryEvent::Forgotten(id));
-        if reason == crate::model::virtual_workspace::WorkspaceTransferReason::Explicit
-            && let Some(source_size) = source_size
-        {
-            self.ensure_workspace_layouts(windows, source, source_size);
-        }
-        if reason == crate::model::virtual_workspace::WorkspaceTransferReason::Explicit {
-            let display = self.display_uuid_for_space(source).map(str::to_owned);
-            self.update_space_display(windows.read(), source, display.as_deref());
+        match rift_core::workspaces::source_after(reason) {
+            SourceAfter::Relaid => {
+                if let Some(source_size) = source_size {
+                    self.ensure_workspace_layouts(windows, source, source_size);
+                }
+                let display = self.display_uuid_for_space(source).map(str::to_owned);
+                self.update_space_display(windows.read(), source, display.as_deref());
+            }
+            SourceAfter::Untouched => {}
         }
         self.sync_scrolling_widths_for_space(windows.read(), target);
         self.workspaces[id].ensure_layout_for_size(size);
@@ -3875,10 +3879,9 @@ impl LayoutEngine {
             changed: true,
             workspace_space: Some(target),
             raise_windows: members.clone(),
-            transferred_windows: if source == target {
-                Vec::new()
-            } else {
-                members
+            transferred_windows: match rift_core::workspaces::moved(source, target) {
+                Moved::InPlace => Vec::new(),
+                Moved::Across => members,
             },
             focus_window: focus,
             ..EventResponse::default()
@@ -5347,6 +5350,76 @@ mod tests {
 
     /// A window evicted from Space 97 (display `a`) into Space 98's active workspace (display
     /// `landed_on`), recorded; with the engine, store, both Spaces and the workspace it left.
+    /// Two Spaces on displays "a" and "b", with `count` workspaces each.
+    fn two_displays(count: usize) -> (LayoutEngine, OwnedWindows, SpaceId, SpaceId) {
+        let settings = VirtualWorkspaceSettings {
+            default_workspace_count: count,
+            ..VirtualWorkspaceSettings::default()
+        };
+        let mut engine = LayoutEngine::new(&settings, &LayoutSettings::default());
+        let mut store = OwnedWindows::default();
+        let (a, b) = (SpaceId::new(97), SpaceId::new(98));
+        for (space, display) in [(a, "a"), (b, "b")] {
+            shown_space(&mut engine, &mut store, space);
+            engine.update_space_display(store.view(), space, Some(display));
+        }
+        (engine, store, a, b)
+    }
+
+    /// An explicit move of a Space's last workspace leaves the Space a new one, laid out at the
+    /// Space's size and homed on its display; a display departure leaves the Space empty.
+    #[test]
+    fn only_an_explicit_transfer_lays_out_and_rehomes_the_space_it_leaves() {
+        use crate::model::virtual_workspace::WorkspaceTransferReason as Reason;
+        let size = CGSize::new(1200.0, 800.0);
+        for (reason, left) in [
+            (Reason::Explicit, vec![(Some("a".to_owned()), Some(size))]),
+            (Reason::DisplayDeparture, vec![]),
+        ] {
+            let (mut engine, mut store, a, b) = two_displays(1);
+            let moved = engine.workspaces.reading(store.view()).active_workspace(a).unwrap();
+            let target_size = CGSize::new(1000.0, 700.0);
+            let _ = engine.transfer_workspace(
+                &mut store.view_mut(),
+                moved,
+                b,
+                target_size,
+                Some("b"),
+                reason,
+            );
+            let on_a: Vec<_> = engine.workspaces.reading(store.view()).workspaces_on(a).collect();
+            let homes: Vec<_> = (on_a.iter())
+                .map(|&id| {
+                    let workspace = &engine.workspaces[id];
+                    (
+                        workspace.home.display().map(str::to_owned),
+                        workspace.layout_state.active_size(),
+                    )
+                })
+                .collect();
+            assert_eq!(homes, left, "{reason:?}");
+        }
+    }
+
+    /// Going to a workspace of another Space shows it there (a change); going to one that Space
+    /// shows already only moves focus there.
+    #[test]
+    fn a_workspace_shown_on_another_space_only_takes_focus_there() {
+        let (mut engine, mut store, a, b) = two_displays(2);
+        let on_b: Vec<_> = engine.workspaces.reading(store.view()).workspaces_on(b).collect();
+        let shown = engine.workspaces.reading(store.view()).active_workspace(b).unwrap();
+        let hidden = *on_b.iter().find(|&&id| id != shown).unwrap();
+        let focus_only = engine.navigate_to_workspace(&mut store.view_mut(), a, shown, None);
+        assert_eq!(focus_only.workspace_space, Some(b));
+        assert!(!focus_only.changed, "a shown workspace only takes focus");
+        let shows = engine.navigate_to_workspace(&mut store.view_mut(), a, hidden, None);
+        assert_eq!(
+            engine.workspaces.reading(store.view()).active_workspace(b),
+            Some(hidden)
+        );
+        assert!(shows.changed, "a hidden workspace is shown");
+    }
+
     fn evicted_window(
         landed_on: &str,
     ) -> (
