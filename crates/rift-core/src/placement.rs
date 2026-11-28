@@ -254,6 +254,279 @@ pub fn target_kept<T: PartialEq>(before: Option<T>, after: Option<T>) -> Kept {
     }
 }
 
+/// Why a window is relocated, which decides how its floating state travels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Policy<D, T> {
+    /// A command moved it to a workspace.
+    Workspace,
+    /// Observation found it on its new workspace (an app rule may have assigned it already).
+    Observed,
+    /// A drop moved it, with or without a prospective tree `T` for the destination.
+    Drop(Edited<T>),
+    /// A directional move: it is inserted toward `D` and its floating state is left alone.
+    Directional(D),
+}
+
+/// Whether a drop brought a prospective tree for the destination.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Edited<T> {
+    Tree(T),
+    NoTree,
+}
+
+/// A workspace's layout family, as relocation reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Family {
+    /// A floating layout system: windows in it are tiled into it, never floated over it.
+    Floating,
+    Scrolling,
+    Tiled,
+}
+
+/// What a relocation is decided from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RelocationFacts<K, S, D, T, L> {
+    pub policy: Policy<D, T>,
+    pub source: K,
+    pub destination: K,
+    /// The source's and the destination's families, if both are workspaces rift holds.
+    pub families: Option<(Family, Family)>,
+    /// The Space the window goes to, and the Space the destination is on.
+    pub space: S,
+    pub destination_space: Option<S>,
+    /// The window's workspace now.
+    pub owner: Option<K>,
+    /// The window floats, as the engine's projection says (`is_window_floating`).
+    pub projected_floating: bool,
+    /// The window is in the floating set.
+    pub in_floats: bool,
+    /// The destination's layout on the Space, if it has one.
+    pub layout: Option<L>,
+    pub preserve_widths: bool,
+    pub unavailable: bool,
+    pub placeable: bool,
+}
+
+/// Why a relocation is refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelocationRefusal {
+    /// The source or the destination is not a workspace rift holds.
+    UnknownWorkspace,
+    /// The destination is not on the Space the window goes to.
+    OtherSpace,
+    /// The window belongs to a third workspace (only observation may find it on the destination
+    /// already, assigned by an app rule).
+    OwnedElsewhere,
+    /// A directional move into a destination with no layout to insert into.
+    DirectionalWithoutLayout,
+}
+
+/// Whether the window must be assigned to the destination.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Assign {
+    /// It belongs there already.
+    Already,
+    Assign,
+}
+
+/// Whether a scrolling destination keeps the window's width.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Width {
+    Preserve,
+    AsIs,
+}
+
+/// How a window goes into the destination's tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Placed<Wd, T, L> {
+    /// The drop's prospective tree becomes the destination's.
+    Edited { tree: T, width: Wd },
+    /// It is added to the destination's layout.
+    Add { layout: L, width: Wd },
+    /// The destination has no layout on the Space: nothing is inserted.
+    NoLayout,
+}
+
+/// Whether a window floated in the destination was in the destination's tree already.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Observed {
+    /// Observation found it a member: it leaves the destination's tree.
+    WasMember,
+    Moved,
+}
+
+/// What the window becomes in the destination.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Projection<D, T, L> {
+    /// It floats over the destination (it floated, and the destination tiles).
+    Float { observed: Observed },
+    /// It floated, and the destination is a floating layout: it leaves the floating set (its
+    /// last focus kept) and is tiled into that layout (never scrolling, so no width to keep).
+    Unfloat { placed: Placed<(), T, L> },
+    /// It is tiled, its width kept or not.
+    Tile { placed: Placed<Width, T, L> },
+    /// A directional move: inserted toward `D` into the destination's layout (there is one: a
+    /// directional move without one is refused), its floating state untouched.
+    Toward {
+        direction: D,
+        width: Width,
+        layout: L,
+    },
+}
+
+/// The window's state after it lands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Afterwards {
+    /// It is unavailable, or a command moved it where it cannot be placed.
+    Suspended,
+    /// Observation found it: it takes part in the destination's layout.
+    Resumed,
+    AsIs,
+}
+
+/// What relocating a window does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Relocation<D, T, L> {
+    Refused(RelocationRefusal),
+    Move {
+        assign: Assign,
+        projection: Projection<D, T, L>,
+        afterwards: Afterwards,
+    },
+}
+
+/// How a window goes into the destination's tree: the drop's tree, else an addition if there is
+/// a layout.
+fn placed<Wd, T, L>(edited: Edited<T>, layout: Option<L>, width: Wd) -> Placed<Wd, T, L> {
+    match (edited, layout) {
+        (Edited::Tree(tree), _) => Placed::Edited { tree, width },
+        (Edited::NoTree, Some(layout)) => Placed::Add { layout, width },
+        (Edited::NoTree, None) => Placed::NoLayout,
+    }
+}
+
+impl<Wd, T, L> Placed<Wd, T, L> {
+    /// The same placement with its width answer replaced.
+    pub fn with_width<W2>(self, width: impl FnOnce(Wd) -> W2) -> Placed<W2, T, L> {
+        match self {
+            Placed::Edited { tree, width: w } => Placed::Edited { tree, width: width(w) },
+            Placed::Add { layout, width: w } => Placed::Add { layout, width: width(w) },
+            Placed::NoLayout => Placed::NoLayout,
+        }
+    }
+}
+
+/// A move that is not directional: the window floats, unfloats into a floating layout, or tiles.
+fn projected<D, T, L>(
+    floating: bool,
+    observed: Observed,
+    into_floating_layout: bool,
+    edited: Edited<T>,
+    width: Width,
+    layout: Option<L>,
+) -> Projection<D, T, L> {
+    match (floating, into_floating_layout) {
+        (true, false) => Projection::Float { observed },
+        (true, true) => Projection::Unfloat {
+            placed: placed(edited, layout, ()),
+        },
+        (false, _) => Projection::Tile {
+            placed: placed(edited, layout, width),
+        },
+    }
+}
+
+/// What relocating a window does, from its facts.
+pub fn relocation<K: Copy + PartialEq, S: PartialEq, D, T, L>(
+    facts: RelocationFacts<K, S, D, T, L>,
+) -> Relocation<D, T, L> {
+    let RelocationFacts {
+        policy,
+        source,
+        destination,
+        families,
+        space,
+        destination_space,
+        owner,
+        projected_floating,
+        in_floats,
+        layout,
+        preserve_widths,
+        unavailable,
+        placeable,
+    } = facts;
+    let Some((source_family, destination_family)) = families else {
+        return Relocation::Refused(RelocationRefusal::UnknownWorkspace);
+    };
+    let observed = matches!(policy, Policy::Observed);
+    let commanded = matches!(policy, Policy::Workspace);
+    if destination_space.as_ref() != Some(&space) {
+        return Relocation::Refused(RelocationRefusal::OtherSpace);
+    }
+    if let Some(owner) = owner
+        && owner != source
+        && !(observed && owner == destination)
+    {
+        return Relocation::Refused(RelocationRefusal::OwnedElsewhere);
+    }
+    let width = |has_layout: bool| match (destination_family, preserve_widths && has_layout) {
+        (Family::Scrolling, true) => Width::Preserve,
+        _ => Width::AsIs,
+    };
+    let floating_layouts =
+        source_family == Family::Floating || destination_family == Family::Floating;
+    let into_floating_layout = destination_family == Family::Floating;
+    let laid = layout.is_some();
+    let projection = match policy {
+        Policy::Directional(direction) => match layout {
+            None => return Relocation::Refused(RelocationRefusal::DirectionalWithoutLayout),
+            Some(layout) => Projection::Toward {
+                direction,
+                width: width(true),
+                layout,
+            },
+        },
+        // A command does not float a window into or out of a floating layout.
+        Policy::Workspace => projected(
+            in_floats && !floating_layouts,
+            Observed::Moved,
+            into_floating_layout,
+            Edited::NoTree,
+            width(laid),
+            layout,
+        ),
+        Policy::Observed => projected(
+            projected_floating,
+            Observed::WasMember,
+            into_floating_layout,
+            Edited::NoTree,
+            width(laid),
+            layout,
+        ),
+        Policy::Drop(edited) => projected(
+            projected_floating,
+            Observed::Moved,
+            into_floating_layout,
+            edited,
+            width(laid),
+            layout,
+        ),
+    };
+    let assign = if owner == Some(destination) {
+        Assign::Already
+    } else {
+        Assign::Assign
+    };
+    let afterwards = if unavailable || (commanded && !placeable) {
+        Afterwards::Suspended
+    } else if observed {
+        Afterwards::Resumed
+    } else {
+        Afterwards::AsIs
+    };
+    Relocation::Move { assign, projection, afterwards }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -282,6 +555,246 @@ mod tests {
             in_destination: true,
             floating: false,
         })
+    }
+
+    fn moving(
+        policy: Policy<u8, &'static str>,
+    ) -> RelocationFacts<u32, u32, u8, &'static str, char> {
+        RelocationFacts {
+            policy,
+            source: 10,
+            destination: 11,
+            families: Some((Family::Tiled, Family::Tiled)),
+            space: 1,
+            destination_space: Some(1),
+            owner: Some(10),
+            projected_floating: false,
+            in_floats: false,
+            layout: Some('L'),
+            preserve_widths: true,
+            unavailable: false,
+            placeable: true,
+        }
+    }
+
+    fn projection(
+        facts: RelocationFacts<u32, u32, u8, &'static str, char>,
+    ) -> Projection<u8, &'static str, char> {
+        match relocation(facts) {
+            Relocation::Move { projection, .. } => projection,
+            refused => panic!("{refused:?}"),
+        }
+    }
+
+    #[test]
+    fn a_relocation_is_refused_for_an_unknown_workspace_another_space_or_owner_or_no_layout() {
+        let r = |facts| relocation(facts);
+        let refused = |reason| Relocation::<u8, &str, char>::Refused(reason);
+        let facts = moving(Policy::Workspace);
+        assert_eq!(
+            r(RelocationFacts { families: None, ..facts }),
+            refused(RelocationRefusal::UnknownWorkspace)
+        );
+        for destination_space in [None, Some(2)] {
+            assert_eq!(
+                r(RelocationFacts { destination_space, ..facts }),
+                refused(RelocationRefusal::OtherSpace)
+            );
+        }
+        assert_eq!(
+            r(RelocationFacts { owner: Some(12), ..facts }),
+            refused(RelocationRefusal::OwnedElsewhere)
+        );
+        // Only observation may find it on the destination already.
+        assert_eq!(
+            r(RelocationFacts { owner: Some(11), ..facts }),
+            refused(RelocationRefusal::OwnedElsewhere)
+        );
+        assert!(matches!(
+            r(RelocationFacts {
+                owner: Some(11),
+                ..moving(Policy::Observed)
+            }),
+            Relocation::Move { assign: Assign::Already, .. }
+        ));
+        assert!(matches!(
+            r(RelocationFacts { owner: None, ..facts }),
+            Relocation::Move { assign: Assign::Assign, .. }
+        ));
+        assert_eq!(
+            r(RelocationFacts {
+                layout: None,
+                ..moving(Policy::Directional(3))
+            }),
+            refused(RelocationRefusal::DirectionalWithoutLayout)
+        );
+    }
+
+    #[test]
+    fn a_relocated_window_floats_unfloats_tiles_or_goes_toward_a_direction() {
+        let floating = |policy| RelocationFacts {
+            projected_floating: true,
+            in_floats: true,
+            ..moving(policy)
+        };
+        assert_eq!(projection(floating(Policy::Workspace)), Projection::Float {
+            observed: Observed::Moved
+        });
+        assert_eq!(projection(floating(Policy::Observed)), Projection::Float {
+            observed: Observed::WasMember
+        });
+        // A command into or out of a floating layout tiles a floating window.
+        for families in [
+            (Family::Floating, Family::Tiled),
+            (Family::Tiled, Family::Floating),
+        ] {
+            assert_eq!(
+                projection(RelocationFacts {
+                    families: Some(families),
+                    ..floating(Policy::Workspace)
+                }),
+                Projection::Tile {
+                    placed: Placed::Add {
+                        layout: 'L',
+                        width: Width::AsIs
+                    }
+                }
+            );
+        }
+        // Observation and drops read the projection, into a floating layout: unfloat.
+        for policy in [Policy::Observed, Policy::Drop(Edited::NoTree)] {
+            assert_eq!(
+                projection(RelocationFacts {
+                    families: Some((Family::Tiled, Family::Floating)),
+                    ..floating(policy)
+                }),
+                Projection::Unfloat {
+                    placed: Placed::Add { layout: 'L', width: () }
+                }
+            );
+        }
+        // The floating set alone does not make an observed window float.
+        assert_eq!(
+            projection(RelocationFacts {
+                projected_floating: false,
+                ..floating(Policy::Observed)
+            }),
+            Projection::Tile {
+                placed: Placed::Add {
+                    layout: 'L',
+                    width: Width::AsIs
+                }
+            }
+        );
+        assert_eq!(
+            projection(moving(Policy::Drop(Edited::Tree("tree")))),
+            Projection::Tile {
+                placed: Placed::Edited {
+                    tree: "tree",
+                    width: Width::AsIs
+                }
+            }
+        );
+        assert_eq!(
+            projection(RelocationFacts {
+                layout: None,
+                ..moving(Policy::Workspace)
+            }),
+            Projection::Tile { placed: Placed::NoLayout }
+        );
+        assert_eq!(
+            projection(floating(Policy::Directional(3))),
+            Projection::Toward {
+                direction: 3,
+                width: Width::AsIs,
+                layout: 'L'
+            }
+        );
+    }
+
+    #[test]
+    fn a_scrolling_destination_keeps_the_width_when_the_setting_asks_and_it_has_a_layout() {
+        let scrolling = |policy| RelocationFacts {
+            families: Some((Family::Tiled, Family::Scrolling)),
+            ..moving(policy)
+        };
+        assert_eq!(projection(scrolling(Policy::Workspace)), Projection::Tile {
+            placed: Placed::Add {
+                layout: 'L',
+                width: Width::Preserve
+            }
+        });
+        assert_eq!(
+            projection(RelocationFacts {
+                preserve_widths: false,
+                ..scrolling(Policy::Workspace)
+            }),
+            Projection::Tile {
+                placed: Placed::Add {
+                    layout: 'L',
+                    width: Width::AsIs
+                }
+            }
+        );
+        assert_eq!(
+            projection(RelocationFacts {
+                layout: None,
+                ..scrolling(Policy::Drop(Edited::Tree("tree")))
+            }),
+            Projection::Tile {
+                placed: Placed::Edited {
+                    tree: "tree",
+                    width: Width::AsIs
+                }
+            }
+        );
+        let floating = RelocationFacts {
+            in_floats: true,
+            ..scrolling(Policy::Directional(3))
+        };
+        assert_eq!(projection(floating), Projection::Toward {
+            direction: 3,
+            width: Width::Preserve,
+            layout: 'L'
+        });
+    }
+
+    #[test]
+    fn a_relocated_window_is_suspended_resumed_or_left() {
+        let afterwards = |facts| match relocation(facts) {
+            Relocation::Move { afterwards, .. } => afterwards,
+            refused => panic!("{refused:?}"),
+        };
+        assert_eq!(
+            afterwards(RelocationFacts {
+                unavailable: true,
+                ..moving(Policy::Observed)
+            }),
+            Afterwards::Suspended
+        );
+        assert_eq!(
+            afterwards(RelocationFacts {
+                placeable: false,
+                ..moving(Policy::Workspace)
+            }),
+            Afterwards::Suspended
+        );
+        // Only a command's move suspends a window it cannot place.
+        assert_eq!(
+            afterwards(RelocationFacts {
+                placeable: false,
+                ..moving(Policy::Observed)
+            }),
+            Afterwards::Resumed
+        );
+        assert_eq!(
+            afterwards(RelocationFacts {
+                placeable: false,
+                ..moving(Policy::Directional(3))
+            }),
+            Afterwards::AsIs
+        );
+        assert_eq!(afterwards(moving(Policy::Workspace)), Afterwards::AsIs);
     }
 
     #[test]

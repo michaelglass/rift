@@ -104,7 +104,6 @@
 1	clippy::large_enum_variant	src/actor/reactor/animation.rs	enum Motion
 1	clippy::large_enum_variant	src/actor/stack_line.rs	enum Event
 1	clippy::large_enum_variant	src/actor/wm_controller.rs	enum WmEvent
-1	clippy::large_enum_variant	src/layout_engine/engine.rs	enum WindowRelocation
 1	clippy::large_enum_variant	src/model/reactor.rs	enum ReactorError
 1	clippy::len_zero	src/actor/reactor/managers.rs	fn apply_layout
 1	clippy::let_and_return	src/actor/reactor.rs	fn new

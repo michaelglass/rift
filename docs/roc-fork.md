@@ -1283,7 +1283,37 @@ E1c-2 relocation, E1c-3 placement, the moves, assignment and the rule outcome, E
   (a floating target or a floating layout is also refused by the layout system's own answer), so the
   facts were made queries and tested directly; three needed the tests above.
 
-- Next: E1c-2 (relocation).
+**E1c-2 (2026-11-28): relocation's choices are a core plan**, `rift_core::placement::relocation`
+over `RelocationFacts` → `Relocation::{Refused(RelocationRefusal), Move { assign, projection,
+afterwards }}`.
+- Refusals: `UnknownWorkspace`, `OtherSpace`, `OwnedElsewhere`, `DirectionalWithoutLayout`.
+  `Assign::{Already, Assign}` (assignment itself stays an effect; its refusal is its own outcome).
+- `Projection<D, T, L>`: `Float { observed: Observed::{WasMember, Moved} }`, `Unfloat { placed }`,
+  `Tile { placed }`, `Toward { direction, width, layout }`. `Placed<Wd, T, L>`: `Edited { tree,
+  width }`, `Add { layout, width }`, `NoLayout`. The drop's tree (`T`) and the destination's layout
+  (`L`) ride in the variants that use them, so the engine unwraps nothing the plan says exists.
+- **The approved shape had one case wrong, found by tracing:** "from floating" belongs to the
+  non-directional moves, not the directional one. A directional move never touches the floating
+  state and ignores whether the window floated; a non-directional move of a floating window into a
+  floating layout leaves the floats (`Unfloat`). `Unfloat` has no width (a floating layout is never
+  scrolling) and `Toward` always has a layout (without one it is refused), so the tightening's
+  property holds: no impossible pair is representable. The engine's old enum's clippy
+  `large_enum_variant` went with it (baseline 291 -> 290).
+- `Afterwards::{Suspended, Resumed, AsIs}`. The engine's `WindowRelocation` is now the core's
+  `Policy<D, T>` (`Drop(Edited::{Tree(T), NoTree})` replacing `Drop(Option<_>)`), and the drop's
+  `drop_across` passes `Edited`.
+- The engine gathers `relocation_facts` and carries a plan out (`leave_floats`, `keep_width`,
+  `place_relocated`).
+- Tests: every refusal, projection, width and afterwards case in rift-core; in the engine (none
+  existed for these effects), a moved floating window keeping floating and trading its focus for the
+  last focus, an observed window a floating layout holds counting as floating, an observed floating
+  window leaving the destination's tree, a hidden window suspended by a command, an observed window
+  suspended in the destination taking part again, a scrolling destination keeping the width the
+  window has now.
+- Plants 23/23 (twelve on the core, eleven on the engine; seven engine plants survived until those
+  tests existed; the resume plant needed the one case where the window is not re-added).
+
+- Next: E1c-3 (placement, the moves, assignment, the rule outcome).
 
 **Pruning (the lead, 2026-11-26):** at a milestone, delete only what no future build reuses:
 stale `target/roc-build` keys (all but the current sources', which the build script's line

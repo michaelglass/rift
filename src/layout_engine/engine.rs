@@ -9,7 +9,8 @@ use rift_core::focus::{
 };
 use rift_core::native_memory::{Candidate, Current, Held as _, MemoryAnswer, MemoryEvent};
 use rift_core::placement::{
-    Across, Arrangement, DropEdit, DropFacts, DropPlan, DropTarget, Kept, Laid, Override,
+    Across, Afterwards, Arrangement, Assign, DropEdit, DropFacts, DropPlan, DropTarget, Edited,
+    Family, Kept, Laid, Observed, Override, Placed, Projection, Relocation, RelocationFacts, Width,
 };
 use rift_core::workspaces::{
     Arrival, ArrivalAsk, Moved, MovedAsk, SourceAfter, Switch, SwitchAsk, WorkspaceAsk,
@@ -199,12 +200,8 @@ fn prepare_scrolling(
     }
 }
 
-enum WindowRelocation {
-    Workspace,
-    Observed,
-    Drop(Option<LayoutSystemKind>),
-    Directional(Direction),
-}
+/// Why a window is relocated: the core's policy, over the layout's directions and trees.
+type WindowRelocation = rift_core::placement::Policy<Direction, LayoutSystemKind>;
 
 pub struct LayoutEngine {
     /// The floating windows, their frames and the focused window (engine slice E2).
@@ -397,7 +394,13 @@ impl LayoutEngine {
                 across,
                 place: (space, _),
             } => {
-                if !self.drop_across(windows, across, (space, destination), drop.window, None) {
+                if !self.drop_across(
+                    windows,
+                    across,
+                    (space, destination),
+                    drop.window,
+                    Edited::NoTree,
+                ) {
                     return false;
                 }
                 windows.clear_floating_display_geometry(drop.window);
@@ -406,7 +409,13 @@ impl LayoutEngine {
             }
             DropPlan::Relocate { from, place: (space, _) } => {
                 let across = Across::Into { from };
-                if !self.drop_across(windows, across, (space, destination), drop.window, None) {
+                if !self.drop_across(
+                    windows,
+                    across,
+                    (space, destination),
+                    drop.window,
+                    Edited::NoTree,
+                ) {
                     return false;
                 }
                 space
@@ -431,8 +440,13 @@ impl LayoutEngine {
                     Kept::Moved => {}
                 }
                 tree.focus(layout, Focus::Select(drop.window)).handled;
-                if !self.drop_across(windows, across, (space, destination), drop.window, Some(tree))
-                {
+                if !self.drop_across(
+                    windows,
+                    across,
+                    (space, destination),
+                    drop.window,
+                    Edited::Tree(tree),
+                ) {
                     return false;
                 }
                 space
@@ -458,7 +472,7 @@ impl LayoutEngine {
         across: Across<VirtualWorkspaceId>,
         (space, destination): (SpaceId, VirtualWorkspaceId),
         window: WindowId,
-        edited: Option<LayoutSystemKind>,
+        edited: Edited<LayoutSystemKind>,
     ) -> bool {
         match (across, edited) {
             (Across::Into { from }, edited) => self.relocate_window_to_workspace(
@@ -468,12 +482,12 @@ impl LayoutEngine {
                 window,
                 WindowRelocation::Drop(edited),
             ),
-            (Across::Same, Some(tree)) => {
+            (Across::Same, Edited::Tree(tree)) => {
                 self.native.step(MemoryEvent::Forgotten(destination));
                 self.workspaces[destination].layout_system = tree;
                 true
             }
-            (Across::Same, None) => true,
+            (Across::Same, Edited::NoTree) => true,
         }
     }
 
@@ -3958,6 +3972,45 @@ impl LayoutEngine {
         self.sync_scrolling_widths_for_space(windows.read(), space);
     }
 
+    /// The layout family of workspace `id`, if rift holds it.
+    fn family(&self, id: VirtualWorkspaceId) -> Option<Family> {
+        self.workspaces
+            .workspaces
+            .get(id)
+            .map(|workspace| match workspace.layout_system {
+                LayoutSystemKind::Floating(_) => Family::Floating,
+                LayoutSystemKind::Scrolling(_) => Family::Scrolling,
+                _ => Family::Tiled,
+            })
+    }
+
+    /// What a relocation is decided from.
+    fn relocation_facts(
+        &self,
+        windows: Windows<'_>,
+        source: VirtualWorkspaceId,
+        (space, destination): (SpaceId, VirtualWorkspaceId),
+        window: WindowId,
+        policy: WindowRelocation,
+    ) -> RelocationFacts<VirtualWorkspaceId, SpaceId, Direction, LayoutSystemKind, LayoutId> {
+        let reading = self.workspaces.reading(windows);
+        RelocationFacts {
+            policy,
+            source,
+            destination,
+            families: self.family(source).zip(self.family(destination)),
+            space,
+            destination_space: reading.workspace_space(destination),
+            owner: windows.workspace_for_window(window),
+            projected_floating: self.is_window_floating(window),
+            in_floats: self.floats.is_floating(window),
+            layout: reading.active_layout(space, destination),
+            preserve_widths: self.layout_settings.scrolling.preserve_window_sizes,
+            unavailable: windows.is_temporarily_unavailable(window),
+            placeable: windows.can_place_window(window),
+        }
+    }
+
     fn relocate_window_to_workspace(
         &mut self,
         windows: &mut WindowsMut<'_>,
@@ -3966,101 +4019,113 @@ impl LayoutEngine {
         window: WindowId,
         policy: WindowRelocation,
     ) -> bool {
-        let Some(source_workspace) = self.workspaces.workspaces.get(source) else {
-            return false;
+        let facts =
+            self.relocation_facts(windows.read(), source, (space, destination), window, policy);
+        let (assign, projection, afterwards) = match rift_core::placement::relocation(facts) {
+            Relocation::Refused(reason) => {
+                debug!(?reason, ?window, "relocation refused");
+                return false;
+            }
+            Relocation::Move { assign, projection, afterwards } => (assign, projection, afterwards),
         };
-        let Some(target_workspace) = self.workspaces.workspaces.get(destination) else {
-            return false;
-        };
-        let observed = matches!(policy, WindowRelocation::Observed);
-        let suspended = windows.is_temporarily_unavailable(window)
-            || (matches!(policy, WindowRelocation::Workspace)
-                && !windows.read().can_place_window(window));
-        let owner = windows.read().workspace_for_window(window);
-        // App rules can commit assignment before observation applies the layout change.
-        if self.workspaces.reading(windows.read()).workspace_space(destination) != Some(space)
-            || owner.is_some_and(|owner| owner != source && !(observed && owner == destination))
-        {
-            return false;
+        match assign {
+            Assign::Already => {}
+            Assign::Assign => {
+                if !self.workspaces.assign_window_to_workspace(windows, space, window, destination)
+                {
+                    return false;
+                }
+            }
         }
-
-        let source_floating_layout =
-            matches!(source_workspace.layout_system, LayoutSystemKind::Floating(_));
-        let target_floating_layout =
-            matches!(target_workspace.layout_system, LayoutSystemKind::Floating(_));
-        let directional = match policy {
-            WindowRelocation::Directional(direction) => Some(direction),
-            _ => None,
-        };
-        let preserve_floating = observed || matches!(policy, WindowRelocation::Drop(_));
-        let was_floating = if preserve_floating {
-            self.is_window_floating(window)
-        } else {
-            self.floats.is_floating(window)
-                && (directional.is_some() || !(source_floating_layout || target_floating_layout))
-        };
-        let target_layout =
-            self.workspaces.reading(windows.read()).active_layout(space, destination);
-        if (directional.is_some() && target_layout.is_none())
-            || (owner != Some(destination)
-                && !self.workspaces.assign_window_to_workspace(windows, space, window, destination))
-        {
-            return false;
-        }
-
         self.forget_native_layout_for_window_id(window);
         self.native.step(MemoryEvent::Forgotten(source));
         self.native.step(MemoryEvent::Forgotten(destination));
         self.workspaces[source].layout_system.update(WindowChange::Remove(window));
-        let project_as_floating = directional.is_none() && was_floating && !target_floating_layout;
-        if directional.is_none() {
-            if project_as_floating {
+        let directional = matches!(projection, Projection::Toward { .. });
+        match projection {
+            Projection::Float { observed } => {
                 self.floats.add_floating(window);
-                if observed {
-                    self.workspaces[destination].layout_system.update(WindowChange::Remove(window));
+                match observed {
+                    Observed::WasMember => {
+                        self.workspaces[destination]
+                            .layout_system
+                            .update(WindowChange::Remove(window));
+                    }
+                    Observed::Moved => {}
                 }
-            } else {
+                self.leave_floats(window);
+            }
+            Projection::Unfloat { placed } => {
                 self.floats.remove_floating(window);
+                self.leave_floats(window);
+                let placed = placed.with_width(|()| Width::AsIs);
+                self.place_relocated(windows.read(), destination, window, placed);
             }
-            if was_floating {
-                self.floats.remove_window(window);
-                self.floats.set_last_focus(Some(window));
+            Projection::Tile { placed } => {
+                self.floats.remove_floating(window);
+                self.place_relocated(windows.read(), destination, window, placed);
             }
-        }
-
-        if !project_as_floating {
-            if (!was_floating || directional.is_some())
-                && matches!(
-                    self.workspaces[destination].layout_system,
-                    LayoutSystemKind::Scrolling(_)
-                )
-                && self.layout_settings.scrolling.preserve_window_sizes
-                && target_layout.is_some()
-            {
-                self.preserve_scrolling_window_width(windows.read(), window);
-            }
-            if let WindowRelocation::Drop(Some(edited)) = policy {
-                self.workspaces[destination].layout_system = edited;
-            } else if let Some(layout) = target_layout {
+            Projection::Toward { direction, width, layout } => {
+                self.keep_width(windows.read(), window, width);
                 self.workspaces[destination].layout_system.update(WindowChange::Add(
                     layout,
                     window,
-                    directional,
+                    Some(direction),
                 ));
             }
         }
-
-        if suspended {
-            self.suspend_window(windows.read(), window);
-        } else if observed {
-            self.workspaces[destination]
-                .layout_system
-                .set_window_participation(window, true);
+        match afterwards {
+            Afterwards::Suspended => {
+                self.suspend_window(windows.read(), window);
+            }
+            Afterwards::Resumed => {
+                self.workspaces[destination]
+                    .layout_system
+                    .set_window_participation(window, true);
+            }
+            Afterwards::AsIs => {}
         }
-        if directional.is_none() && self.floats.focused() == Some(window) {
+        // A directional move leaves the floating state alone, its focus included.
+        if !directional && self.floats.focused() == Some(window) {
             self.floats.set_focused(None);
         }
         true
+    }
+
+    /// A window leaving the floating set: its frame is forgotten, its focus remembered.
+    fn leave_floats(&mut self, window: WindowId) {
+        self.floats.remove_window(window);
+        self.floats.set_last_focus(Some(window));
+    }
+
+    fn keep_width(&mut self, windows: Windows<'_>, window: WindowId, width: Width) {
+        match width {
+            Width::Preserve => self.preserve_scrolling_window_width(windows, window),
+            Width::AsIs => {}
+        }
+    }
+
+    /// A relocated window into the destination's tree, as the plan places it.
+    fn place_relocated(
+        &mut self,
+        windows: Windows<'_>,
+        destination: VirtualWorkspaceId,
+        window: WindowId,
+        placed: Placed<Width, LayoutSystemKind, LayoutId>,
+    ) {
+        match placed {
+            Placed::Edited { tree, width } => {
+                self.keep_width(windows, window, width);
+                self.workspaces[destination].layout_system = tree;
+            }
+            Placed::Add { layout, width } => {
+                self.keep_width(windows, window, width);
+                self.workspaces[destination]
+                    .layout_system
+                    .update(WindowChange::Add(layout, window, None));
+            }
+            Placed::NoLayout => {}
+        }
     }
 
     pub(crate) fn workspace_name(
@@ -4865,6 +4930,207 @@ mod tests {
                 engine.drop_arrangement(store.view(), space),
                 arrangement,
                 "{mode:?}"
+            );
+        }
+    }
+
+    /// A tiled window in the shown workspace `a` of a Space, and another workspace `b` there.
+    fn relocation_fixture(
+        mode: LayoutMode,
+        preserve_widths: bool,
+    ) -> (
+        LayoutEngine,
+        OwnedWindows,
+        SpaceId,
+        VirtualWorkspaceId,
+        VirtualWorkspaceId,
+        WindowId,
+    ) {
+        let mut settings = LayoutSettings {
+            mode,
+            ..LayoutSettings::default()
+        };
+        settings.scrolling.preserve_window_sizes = preserve_widths;
+        let mut engine = LayoutEngine::new(&VirtualWorkspaceSettings::default(), &settings);
+        let mut store = OwnedWindows::default();
+        let space = SpaceId::new(93);
+        shown_space(&mut engine, &mut store, space);
+        let a = engine.workspaces.reading(store.view()).active_workspace(space).unwrap();
+        let b = (engine.workspaces.reading(store.view()).workspaces_on(space))
+            .find(|&id| id != a)
+            .unwrap();
+        let window = WindowId::new(7, 1);
+        store
+            .view_mut()
+            .insert_manageable_window(window, live_window(CGSize::new(400.0, 300.0)));
+        assert!(engine.workspaces.assign_window_to_workspace(
+            &mut store.view_mut(),
+            space,
+            window,
+            a
+        ));
+        let _ = engine.handle_event(&mut store.view_mut(), LayoutEvent::WindowAdded(space, window));
+        (engine, store, space, a, b, window)
+    }
+
+    fn layout_of(
+        engine: &LayoutEngine,
+        store: &OwnedWindows,
+        space: SpaceId,
+        id: VirtualWorkspaceId,
+    ) -> LayoutId {
+        engine.workspaces.reading(store.view()).active_layout(space, id).unwrap()
+    }
+
+    /// A floating window a command moves stays floating, its focus dropped and remembered as
+    /// the last floating focus.
+    #[test]
+    fn a_floating_window_moved_keeps_floating_and_trades_its_focus_for_the_last_focus() {
+        let (mut engine, mut store, space, a, b, window) =
+            relocation_fixture(LayoutMode::Traditional, false);
+        engine.remove_window_from_all_tiling_trees(window);
+        engine.floats.add_floating(window);
+        engine.floats.set_focused(Some(window));
+        assert!(engine.relocate_window_to_workspace(
+            &mut store.view_mut(),
+            a,
+            (space, b),
+            window,
+            WindowRelocation::Workspace
+        ));
+        assert!(engine.floats.is_floating(window));
+        assert_eq!(engine.floats.focused(), None);
+        assert_eq!(engine.floats.last_focus(), Some(window));
+        let layout = layout_of(&engine, &store, space, b);
+        assert!(!engine.workspaces[b].layout_system.contains_window(layout, window));
+    }
+
+    /// Observation reads floating from the projection: a window a floating layout holds floats,
+    /// though it is not in the floating set, and leaves the floats into a floating destination.
+    #[test]
+    fn an_observed_window_a_floating_layout_holds_counts_as_floating() {
+        let (mut engine, mut store, space, a, b, window) =
+            relocation_fixture(LayoutMode::Floating, false);
+        assert!(!engine.floats.is_floating(window));
+        assert!(engine.is_window_floating(window));
+        assert!(engine.relocate_window_to_workspace(
+            &mut store.view_mut(),
+            a,
+            (space, b),
+            window,
+            WindowRelocation::Observed
+        ));
+        assert_eq!(engine.floats.last_focus(), Some(window), "it left the floats");
+    }
+
+    /// A floating window observed on a destination whose tree holds it leaves that tree.
+    #[test]
+    fn an_observed_floating_window_leaves_the_destinations_tree() {
+        let (mut engine, mut store, space, a, b, window) =
+            relocation_fixture(LayoutMode::Traditional, false);
+        engine.remove_window_from_all_tiling_trees(window);
+        engine.floats.add_floating(window);
+        let layout = layout_of(&engine, &store, space, b);
+        engine.workspaces[b]
+            .layout_system
+            .update(WindowChange::Add(layout, window, None));
+        assert!(engine.relocate_window_to_workspace(
+            &mut store.view_mut(),
+            a,
+            (space, b),
+            window,
+            WindowRelocation::Observed
+        ));
+        assert!(!engine.workspaces[b].layout_system.contains_window(layout, window));
+        assert!(engine.floats.is_floating(window));
+    }
+
+    /// A command that moves a window where it cannot be placed (hidden) suspends it there.
+    #[test]
+    fn a_window_moved_where_it_cannot_be_placed_is_suspended() {
+        for mode in [LayoutMode::Traditional, LayoutMode::Floating] {
+            let (mut engine, mut store, space, a, b, window) = relocation_fixture(mode, false);
+            store
+                .view_mut()
+                .set_visibility(window, crate::model::window_store::WindowVisibility::Hidden);
+            assert!(engine.relocate_window_to_workspace(
+                &mut store.view_mut(),
+                a,
+                (space, b),
+                window,
+                WindowRelocation::Workspace
+            ));
+            assert!(
+                !engine.workspaces[b].layout_system.window_participates(window),
+                "{mode:?}"
+            );
+            // Observed again where it is, visible now, it takes part again.
+            store
+                .view_mut()
+                .set_visibility(window, crate::model::window_store::WindowVisibility::Visible);
+            assert!(engine.relocate_window_to_workspace(
+                &mut store.view_mut(),
+                b,
+                (space, b),
+                window,
+                WindowRelocation::Observed
+            ));
+            assert!(
+                engine.workspaces[b].layout_system.window_participates(window),
+                "{mode:?}"
+            );
+        }
+    }
+
+    /// Observation finding a window an app rule already put, suspended, in the destination's
+    /// tree makes it take part there.
+    #[test]
+    fn an_observed_window_suspended_in_the_destination_takes_part_again() {
+        let (mut engine, mut store, space, a, b, window) =
+            relocation_fixture(LayoutMode::Traditional, false);
+        let layout = layout_of(&engine, &store, space, b);
+        engine.workspaces[b]
+            .layout_system
+            .update(WindowChange::Add(layout, window, None));
+        engine.workspaces[b].layout_system.set_window_participation(window, false);
+        assert!(engine.workspaces.assign_window_to_workspace(
+            &mut store.view_mut(),
+            space,
+            window,
+            b
+        ));
+        assert!(!engine.workspaces[b].layout_system.window_participates(window));
+        assert!(engine.relocate_window_to_workspace(
+            &mut store.view_mut(),
+            a,
+            (space, b),
+            window,
+            WindowRelocation::Observed
+        ));
+        assert!(engine.workspaces[b].layout_system.window_participates(window));
+    }
+
+    /// A scrolling destination keeps a moved window's width when the setting asks.
+    #[test]
+    fn a_scrolling_destination_keeps_a_moved_windows_width() {
+        for preserve in [true, false] {
+            let (mut engine, mut store, space, a, b, window) =
+                relocation_fixture(LayoutMode::Scrolling, preserve);
+            // Resized since it was added: the move keeps the width it has now.
+            let resized = CGRect::new(CGPoint::ZERO, CGSize::new(520.0, 300.0));
+            store.view_mut().window_mut(window).unwrap().project_seen(resized);
+            assert!(engine.relocate_window_to_workspace(
+                &mut store.view_mut(),
+                a,
+                (space, b),
+                window,
+                WindowRelocation::Workspace
+            ));
+            let locked = engine.constraints.get(window).map(|c| c.locked_width);
+            assert_eq!(
+                locked.is_some_and(|w| w == 520.0),
+                preserve,
+                "preserve {preserve}"
             );
         }
     }
