@@ -1448,7 +1448,32 @@ which all eleven call sites now ask. With this, every E1c choice decides in Roc.
   on it survived, and the case was removed rather than tested.
 - Plants 7/7 (core and engine; the spaceless plant's target is gone).
 
-- Next: E1d-2 (the display and departure choices in Roc).
+**E1d-2 (2026-11-28): the display and departure choices decide in Roc.**
+`rift_core::display_memory::DisplayAsk`, one per kind (`RehomedAsk` → the workspaces rehomed,
+`ResyncAsk` → `Resync`, `MoveAsk` → `native_memory::Move`), the wire form
+`DisplayQuestion`/`DisplayChoice` behind one Roc entry (`roc_engine_display`,
+`roc/core/EngineDisplays.roc`); the engine's door is `LayoutEngine::displaying`, in a new family
+`DISPLAYS` (reported at exit). The rehomed answer is a list Roc allocates; the boundary reads it
+and releases it.
+- Differential (`rift-core-roc/tests/display_memory.rs`): 20 000 random questions of every kind,
+  with every Roc allocation released; check-fast cuts it to 2000.
+- Tests: every kind through the engine's door, Roc answering.
+- Plants 5/5, among them a Resync question answered with a Move (caught at the door) and the
+  rehomed list left unreleased (caught by the allocation count).
+
+With E1d-2, E1d is done.
+
+### Follow-ups (named, not scheduled)
+
+- **The listing's Space as a type, not a convention.** Several engine paths
+  `expect("a listed workspace has a Space")`: the invariant lives in a convention. When the
+  workspaces core is next touched, see whether the listing can hand back (workspace, Space) pairs
+  so the expect disappears (the lead's note on E1d-1).
+- **Geometry as a pure core function the camera reads** (removing the `Spans` round trip): judged
+  after E1e, as the lead asked.
+
+- Next: the build-time pass the lead asked for after E1d (measure, propose, switch nothing), then
+  E1e.
 
 **Pruning (the lead, 2026-11-26):** at a milestone, delete only what no future build reuses:
 stale `target/roc-build` keys (all but the current sources', which the build script's line

@@ -161,6 +161,154 @@ pub fn resync(shown: bool, rehomed: usize) -> Resync {
     }
 }
 
+/// The layout engine's display and departure choices, as a question (the wire form a Roc core
+/// answers): workspaces `K` and Spaces `S`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DisplayQuestion<K, S> {
+    Rehomed(RehomedAsk<K>),
+    Resync(ResyncAsk),
+    Move(MoveAsk<S>),
+}
+
+/// A display or departure choice's answer, in its wire form.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DisplayChoice<K> {
+    Rehomed(Vec<K>),
+    Resync(Resync),
+    Move(crate::native_memory::Move),
+}
+
+/// [`rehomed`]'s facts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RehomedAsk<K>(pub Vec<(K, Homed)>);
+
+/// [`resync`]'s facts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResyncAsk {
+    pub shown: bool,
+    pub rehomed: usize,
+}
+
+/// [`crate::native_memory::native_move`]'s facts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MoveAsk<S> {
+    pub origin: crate::native_memory::Origin<S>,
+    pub target: S,
+}
+
+/// The answer to `question` (the wire form's), from the functions above.
+pub fn choose_display<K: Copy, S: PartialEq>(question: DisplayQuestion<K, S>) -> DisplayChoice<K> {
+    match question {
+        DisplayQuestion::Rehomed(ask) => DisplayChoice::Rehomed(rehomed(&ask.0)),
+        DisplayQuestion::Resync(ask) => DisplayChoice::Resync(resync(ask.shown, ask.rehomed)),
+        DisplayQuestion::Move(ask) => {
+            DisplayChoice::Move(crate::native_memory::native_move(ask.origin, ask.target))
+        }
+    }
+}
+
+impl<K: Copy, S: Copy> DisplayQuestion<K, S> {
+    /// The question with its workspaces and Spaces renamed.
+    pub fn map<K2, S2>(self, k: impl Fn(K) -> K2, s: impl Fn(S) -> S2) -> DisplayQuestion<K2, S2> {
+        use crate::native_memory::Origin;
+        match self {
+            DisplayQuestion::Rehomed(ask) => DisplayQuestion::Rehomed(RehomedAsk(
+                ask.0.into_iter().map(|(id, homed)| (k(id), homed)).collect(),
+            )),
+            DisplayQuestion::Resync(ask) => DisplayQuestion::Resync(ask),
+            DisplayQuestion::Move(ask) => DisplayQuestion::Move(MoveAsk {
+                origin: match ask.origin {
+                    Origin::Unassigned => Origin::Unassigned,
+                    Origin::On(space) => Origin::On(s(space)),
+                },
+                target: s(ask.target),
+            }),
+        }
+    }
+}
+
+impl<K> DisplayChoice<K> {
+    /// The answer with its workspaces renamed; none where a word names nothing.
+    pub fn map<K2>(self, k: impl Fn(K) -> Option<K2>) -> Option<DisplayChoice<K2>> {
+        Some(match self {
+            DisplayChoice::Rehomed(ids) => {
+                DisplayChoice::Rehomed(ids.into_iter().map(k).collect::<Option<_>>()?)
+            }
+            DisplayChoice::Resync(r) => DisplayChoice::Resync(r),
+            DisplayChoice::Move(m) => DisplayChoice::Move(m),
+        })
+    }
+}
+
+/// One kind of display question with its own answer: callers see `Answer`, never a
+/// [`DisplayChoice`]; `of` takes only a choice of its own kind (any other: a twin's bug).
+pub trait DisplayAsk<K, S> {
+    type Answer: PartialEq + std::fmt::Debug;
+    /// The Rust core's answer.
+    fn answer(&self) -> Self::Answer;
+    /// The question in its wire form.
+    fn question(&self) -> DisplayQuestion<K, S>;
+    /// An answer in its wire form.
+    fn choice(answer: &Self::Answer) -> DisplayChoice<K>;
+    /// A wire answer as this kind's answer.
+    fn of(&self, choice: DisplayChoice<K>) -> Option<Self::Answer>;
+}
+
+impl<K: Copy + PartialEq + std::fmt::Debug, S> DisplayAsk<K, S> for RehomedAsk<K> {
+    type Answer = Vec<K>;
+
+    fn answer(&self) -> Vec<K> { rehomed(&self.0) }
+
+    fn question(&self) -> DisplayQuestion<K, S> { DisplayQuestion::Rehomed(self.clone()) }
+
+    fn choice(answer: &Vec<K>) -> DisplayChoice<K> { DisplayChoice::Rehomed(answer.clone()) }
+
+    fn of(&self, choice: DisplayChoice<K>) -> Option<Vec<K>> {
+        match choice {
+            DisplayChoice::Rehomed(ids) => Some(ids),
+            DisplayChoice::Resync(_) | DisplayChoice::Move(_) => None,
+        }
+    }
+}
+
+impl<K, S> DisplayAsk<K, S> for ResyncAsk {
+    type Answer = Resync;
+
+    fn answer(&self) -> Resync { resync(self.shown, self.rehomed) }
+
+    fn question(&self) -> DisplayQuestion<K, S> { DisplayQuestion::Resync(*self) }
+
+    fn choice(answer: &Resync) -> DisplayChoice<K> { DisplayChoice::Resync(*answer) }
+
+    fn of(&self, choice: DisplayChoice<K>) -> Option<Resync> {
+        match choice {
+            DisplayChoice::Resync(r) => Some(r),
+            DisplayChoice::Rehomed(_) | DisplayChoice::Move(_) => None,
+        }
+    }
+}
+
+impl<K, S: Copy + PartialEq> DisplayAsk<K, S> for MoveAsk<S> {
+    type Answer = crate::native_memory::Move;
+
+    fn answer(&self) -> crate::native_memory::Move {
+        crate::native_memory::native_move(self.origin, self.target)
+    }
+
+    fn question(&self) -> DisplayQuestion<K, S> { DisplayQuestion::Move(*self) }
+
+    fn choice(answer: &crate::native_memory::Move) -> DisplayChoice<K> {
+        DisplayChoice::Move(*answer)
+    }
+
+    fn of(&self, choice: DisplayChoice<K>) -> Option<crate::native_memory::Move> {
+        match choice {
+            DisplayChoice::Move(m) => Some(m),
+            DisplayChoice::Rehomed(_) | DisplayChoice::Resync(_) => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -243,6 +243,11 @@ pub(crate) static WORKSPACES: Family = Family::new();
 #[cfg(feature = "roc-core")]
 pub(crate) static PLACEMENT: Family = Family::new();
 
+/// The layout engine's display and departure questions (`rift_core::display_memory`,
+/// `EngineDisplays.roc`): rehoming, width resyncs, departures.
+#[cfg(feature = "roc-core")]
+pub(crate) static DISPLAYS: Family = Family::new();
+
 /// The reconciler (`rift_core::RustCore` and the Roc core's `step`): every effect it decides.
 #[cfg(feature = "roc-core")]
 pub(crate) static RECONCILER: Family = Family::new();

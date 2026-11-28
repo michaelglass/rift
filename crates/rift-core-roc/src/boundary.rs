@@ -4213,6 +4213,92 @@ impl Drop for CamerasBox {
 }
 
 // ---------------------------------------------------------------------------------------------
+// The layout engine's display and departure choices.
+
+pub(crate) fn engine_display_question(
+    question: rift_core::display_memory::DisplayQuestion<u64, u64>,
+    host: &abi::RocHost,
+) -> abi::BoundaryDisplayQuestion {
+    use abi::BoundaryDisplayQuestionTag as Tag;
+    use rift_core::display_memory::{DisplayQuestion as Q, Homed};
+    use rift_core::native_memory::Origin;
+    match question {
+        Q::Rehomed(ask) => {
+            let on_space: Vec<_> = (ask.0.iter())
+                .map(|&(workspace, homed)| abi::BoundaryWorkspaceHomed {
+                    workspace,
+                    homed: match homed {
+                        Homed::Homed => abi::BoundaryHomedWire::Homed,
+                        Homed::Homeless => abi::BoundaryHomedWire::Homeless,
+                    },
+                })
+                .collect();
+            union!(
+                BoundaryDisplayQuestion,
+                BoundaryDisplayQuestionPayload.rehomed(list(&on_space, host)),
+                Tag::Rehomed
+            )
+        }
+        Q::Resync(ask) => union!(
+            BoundaryDisplayQuestion,
+            BoundaryDisplayQuestionPayload.resync(abi::BoundaryResyncQuestion {
+                shown: ask.shown,
+                rehomed: ask.rehomed as u64,
+            }),
+            Tag::Resync
+        ),
+        Q::Move(ask) => {
+            let origin = match ask.origin {
+                Origin::Unassigned => union!(
+                    BoundaryOriginWire,
+                    BoundaryOriginWirePayload.unassigned,
+                    abi::BoundaryOriginWireTag::Unassigned
+                ),
+                Origin::On(space) => union!(
+                    BoundaryOriginWire,
+                    BoundaryOriginWirePayload.on(space),
+                    abi::BoundaryOriginWireTag::On
+                ),
+            };
+            union!(
+                BoundaryDisplayQuestion,
+                BoundaryDisplayQuestionPayload
+                    .r#move(abi::BoundaryMoveQuestion { origin, target: ask.target }),
+                Tag::Move
+            )
+        }
+    }
+}
+
+pub(crate) fn engine_display_choice(
+    choice: abi::BoundaryDisplayChoice,
+    host: &abi::RocHost,
+) -> rift_core::display_memory::DisplayChoice<u64> {
+    use abi::BoundaryDisplayChoiceTag as Tag;
+    use rift_core::display_memory::{DisplayChoice as C, Resync};
+    use rift_core::native_memory::Move;
+    // SAFETY: each arm reads the payload its tag names.
+    match choice.tag {
+        Tag::Rehomed => {
+            let ids = unsafe { *choice.borrow_payload_rehomed_unchecked() };
+            let words = ids.as_slice().to_vec();
+            // SAFETY: the list is Roc's answer, owned here and read in full above.
+            unsafe { release_flat(ids, host) };
+            C::Rehomed(words)
+        }
+        Tag::Resync => C::Resync(match unsafe { *choice.borrow_payload_resync_unchecked() } {
+            abi::BoundaryResyncWire::Resync => Resync::Resync,
+            abi::BoundaryResyncWire::Unchanged => Resync::Unchanged,
+        }),
+        Tag::Move => C::Move(match unsafe { *choice.borrow_payload_move_unchecked() } {
+            abi::BoundaryNativeMoveWire::Departure => Move::Departure,
+            abi::BoundaryNativeMoveWire::Within => Move::Within,
+            abi::BoundaryNativeMoveWire::Unassigned => Move::Unassigned,
+        }),
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
 // The layout engine's remaining placement choices.
 
 pub(crate) fn engine_place_question(

@@ -352,6 +352,33 @@ impl LayoutEngine {
 
     /// Validate a prospective drop on a workspace-local tree before touching membership.
     /// The regular relocation and target-drop primitives perform the committed operation.
+    /// One of the engine's display and departure choices, answered in its own kind: the Rust
+    /// core's answer, and under `roc-core` the Roc core's, which decides (a difference, or an
+    /// answer of another kind, reported; the Rust answer stands).
+    fn displaying<A: rift_core::display_memory::DisplayAsk<VirtualWorkspaceId, SpaceId>>(
+        ask: &A,
+    ) -> A::Answer {
+        let rust = ask.answer();
+        #[cfg(feature = "roc-core")]
+        let rust = {
+            use crate::roc_path::Word;
+            let words = ask.question().map(Word::word, Word::word);
+            let roc = rift_core_roc::displays::engine_display(words.clone());
+            let rust_words = A::choice(&rust).map(|k| Some(k.word())).expect("words for every id");
+            crate::roc_path::decided(
+                &crate::roc_path::DISPLAYS,
+                "engine_display",
+                &[],
+                &words,
+                rust,
+                &rust_words,
+                Ok(roc),
+                |roc| ask.of(roc.map(crate::roc_path::FromWord::from_word)?),
+            )
+        };
+        rust
+    }
+
     /// One of the engine's remaining placement choices (placement, the moves, assignment, the
     /// rule outcome, a floating frame), answered in its own kind: the Rust core's answer, and
     /// under `roc-core` the Roc core's, which decides. The layout and a rule's placement and
@@ -1656,7 +1683,7 @@ impl LayoutEngine {
                         .expect("a listed workspace has a Space"),
                 ),
             };
-            match rift_core::native_memory::native_move(origin, target) {
+            match Self::displaying(&rift_core::display_memory::MoveAsk { origin, target }) {
                 Move::Departure => self.remember_native_departure(windows, window),
                 Move::Within | Move::Unassigned => {}
             }
@@ -2051,7 +2078,7 @@ impl LayoutEngine {
                 (id, homed)
             })
             .collect();
-        let rehomed = rift_core::display_memory::rehomed(&on_space);
+        let rehomed = Self::displaying(&rift_core::display_memory::RehomedAsk(on_space));
         for &id in &rehomed {
             let workspace = &mut self.workspaces[id];
             let by = workspace.home.placed_by().unwrap_or_default();
@@ -2069,7 +2096,8 @@ impl LayoutEngine {
             display: uuid.to_owned(),
             last,
         });
-        match rift_core::display_memory::resync(shown, rehomed.len()) {
+        let resync = rift_core::display_memory::ResyncAsk { shown, rehomed: rehomed.len() };
+        match Self::displaying(&resync) {
             Resync::Resync => self.sync_scrolling_widths_for_space(windows, space),
             Resync::Unchanged => {}
         }
@@ -5111,6 +5139,46 @@ mod tests {
         assert_eq!(
             rift_core::placement::drop_plan(facts),
             DropPlan::Refused(rift_core::placement::DropRefusal::FloatingTarget)
+        );
+    }
+
+    /// Every kind of display and departure question through the engine's door; under
+    /// `roc-core` the Roc core answers too (a difference, or an answer of another kind, fails
+    /// here).
+    #[test]
+    fn each_display_question_answers_in_its_own_kind() {
+        use rift_core::display_memory::{Homed, MoveAsk, RehomedAsk, Resync, ResyncAsk};
+        use rift_core::native_memory::{Move, Origin};
+        let mut workspaces: slotmap::SlotMap<VirtualWorkspaceId, ()> = slotmap::SlotMap::with_key();
+        let (one, two) = (workspaces.insert(()), workspaces.insert(()));
+        let (here, there) = (SpaceId::new(1), SpaceId::new(2));
+        assert_eq!(
+            LayoutEngine::displaying(&RehomedAsk(vec![
+                (one, Homed::Homed),
+                (two, Homed::Homeless)
+            ])),
+            vec![two]
+        );
+        assert_eq!(
+            LayoutEngine::displaying(&ResyncAsk { shown: false, rehomed: 1 }),
+            Resync::Resync
+        );
+        assert_eq!(
+            LayoutEngine::displaying(&ResyncAsk { shown: false, rehomed: 0 }),
+            Resync::Unchanged
+        );
+        let moving = |origin, target| MoveAsk { origin, target };
+        assert_eq!(
+            LayoutEngine::displaying(&moving(Origin::On(here), there)),
+            Move::Departure
+        );
+        assert_eq!(
+            LayoutEngine::displaying(&moving(Origin::On(here), here)),
+            Move::Within
+        );
+        assert_eq!(
+            LayoutEngine::displaying(&moving(Origin::Unassigned, here)),
+            Move::Unassigned
         );
     }
 

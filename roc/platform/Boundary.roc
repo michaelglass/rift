@@ -1021,6 +1021,29 @@ Boundary := [].{
 
 	NativeBatchView := [Idle, Collecting(List(U64))]
 
+	# The layout engine's display and departure choices
+	# (`rift_core::display_memory::choose_display`): workspaces and Spaces are one word each.
+
+	HomedWire := [Homed, Homeless]
+
+	WorkspaceHomed := { workspace : U64, homed : HomedWire }
+
+	ResyncQuestion := { shown : Bool, rehomed : U64 }
+
+	OriginWire := [Unassigned, On(U64)]
+
+	MoveQuestion := { origin : OriginWire, target : U64 }
+
+	## One of the layout engine's display and departure choices.
+	DisplayQuestion := [Rehomed(List(WorkspaceHomed)), Resync(ResyncQuestion), Move(MoveQuestion)]
+
+	ResyncWire := [Resync, Unchanged]
+
+	NativeMoveWire := [Departure, Within, Unassigned]
+
+	## A display or departure choice's answer.
+	DisplayChoice := [Rehomed(List(U64)), Resync(ResyncWire), Move(NativeMoveWire)]
+
 	# The layout engine's remaining placement choices (`rift_core::placement::choose_place`):
 	# windows and workspaces are one word each; the layout and a rule's placement and resize are
 	# tokens.

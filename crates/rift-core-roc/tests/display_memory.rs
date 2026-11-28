@@ -128,3 +128,60 @@ fn the_roc_display_memory_steps_without_copying_a_table() {
     }
     assert_eq!(roc.view(), rust);
 }
+
+/// The layout engine's display and departure choices
+/// (`rift_core::display_memory::choose_display`): which workspaces a shown display rehomes, whether
+/// a Space's widths resync, which moves are departures; every Roc allocation released.
+#[test]
+fn the_roc_core_makes_the_engines_display_choices_as_the_rust_core_does() {
+    use rift_core::display_memory::{
+        DisplayQuestion as Q, Homed, MoveAsk, RehomedAsk, ResyncAsk, choose_display,
+    };
+    use rift_core::native_memory::Origin;
+    use rift_core_roc::AllocationCount;
+    let mut rng = Rng(0xD15F_0E1D_2000);
+    let runs: u64 =
+        std::env::var("RIFT_ENGINE_DISPLAY_CASES").map_or(20_000, |n| n.parse().unwrap());
+    let before = AllocationCount::now();
+    for case in 0..runs {
+        let question: Q<u64, u64> = match rng.next() % 3 {
+            0 => {
+                let n = rng.next() % 5;
+                let on_space = (0..n)
+                    .map(|i| {
+                        (
+                            10 + i,
+                            if rng.next() % 2 == 0 {
+                                Homed::Homed
+                            } else {
+                                Homed::Homeless
+                            },
+                        )
+                    })
+                    .collect();
+                Q::Rehomed(RehomedAsk(on_space))
+            }
+            1 => Q::Resync(ResyncAsk {
+                shown: rng.next() % 2 == 0,
+                rehomed: (rng.next() % 3) as usize,
+            }),
+            _ => Q::Move(MoveAsk {
+                origin: if rng.next() % 4 == 0 {
+                    Origin::Unassigned
+                } else {
+                    Origin::On(1 + rng.next() % 3)
+                },
+                target: 1 + rng.next() % 3,
+            }),
+        };
+        let rust = choose_display(question.clone());
+        let roc = rift_core_roc::displays::engine_display(question.clone());
+        assert_eq!(roc, rust, "case {case}: {question:?}");
+    }
+    assert_eq!(
+        AllocationCount::now().live(),
+        before.live(),
+        "Roc allocations left live"
+    );
+    eprintln!("engine display: {runs} questions answered alike");
+}

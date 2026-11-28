@@ -2511,6 +2511,23 @@ pub mod lifecycle {
 
 /// The workspace decisions and steps (`rift_core::workspaces`) decided by the Roc core. The
 /// steps answer with what a run leaves, as views of the Rust core's state.
+/// The layout engine's display and departure choices (`rift_core::display_memory`).
+pub mod displays {
+    use rift_core::display_memory::{DisplayChoice, DisplayQuestion};
+
+    use crate::{abi, boundary, host};
+
+    /// One of the layout engine's display and departure choices
+    /// (`rift_core::display_memory::choose_display`): every fact is in the question.
+    pub fn engine_display(question: DisplayQuestion<u64, u64>) -> DisplayChoice<u64> {
+        let host = host();
+        let question = boundary::engine_display_question(question, &host);
+        // SAFETY: the question is handed to Roc, which consumes it; the choice's list is read and
+        // released by the conversion.
+        boundary::engine_display_choice(unsafe { abi::roc_engine_display(question) }, &host)
+    }
+}
+
 /// The layout engine's placement choices (`rift_core::placement`).
 pub mod placement {
     use rift_core::layout::bsp_tree::Direction;

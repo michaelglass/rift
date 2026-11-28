@@ -106,6 +106,10 @@ fn show_roc_core() {
         let divergences = crate::roc_path::PLACEMENT.divergences();
         println!("roc-core: placement divergences: {divergences}");
         tracing::info!(divergences, "roc-core: placement divergences");
+        // The layout engine's display questions, the Roc core's (the Rust answers their shadow).
+        let divergences = crate::roc_path::DISPLAYS.divergences();
+        println!("roc-core: display divergences: {divergences}");
+        tracing::info!(divergences, "roc-core: display divergences");
         // The reconciler, the Roc core's (the Rust core its shadow, retired at a difference).
         let divergences = crate::roc_path::RECONCILER.divergences();
         println!("roc-core: reconciler divergences: {divergences}");
